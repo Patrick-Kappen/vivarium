@@ -37,7 +37,7 @@ import {
 	type StreamOptions,
 } from "@earendil-works/pi-ai";
 import * as builtinProviderCatalog from "@earendil-works/pi-ai/providers/all";
-import { getAgentDir } from "../config.ts";
+import { getAgentDir, getModelsPath, getVivariumModelsPath } from "../config.ts";
 import { operationSignal, raceWithAbortSignal } from "../utils/abort.ts";
 import { AuthStorage as DefaultAuthStorage } from "./auth-storage.ts";
 import { ModelConfig } from "./model-config.ts";
@@ -79,6 +79,20 @@ export interface CreateModelRuntimeOptions {
 	signal?: AbortSignal;
 	/** Skip initial catalog and availability refresh. Static models remain available. */
 	refreshOnCreate?: boolean;
+}
+
+/**
+ * Resolve where the writable models-store cache lives for a models config path.
+ *
+ * A managed models.json input (VIVARIUM_MODELS_PATH) may live anywhere and is
+ * read-only; the cache next to it would be unwritable or outside the runtime's
+ * writable state. The cache therefore stays in the writable agent directory.
+ * Explicit caller-supplied paths behave like upstream Pi: cache next to models.json.
+ */
+export function resolveModelsStorePath(modelsPath: string, isManagedModelsInput: boolean): string {
+	return isManagedModelsInput
+		? join(getAgentDir(), "models-store.json")
+		: join(dirname(modelsPath), "models-store.json");
 }
 
 export interface ModelRuntimeAuthOverrides extends AuthOperationOptions {
@@ -171,13 +185,13 @@ export class ModelRuntime implements Models {
 
 	static async create(options: CreateModelRuntimeOptions = {}): Promise<ModelRuntime> {
 		const credentials = new RuntimeCredentials(options.credentials ?? DefaultAuthStorage.create(options.authPath));
-		const modelsPath =
-			options.modelsPath === null ? undefined : (options.modelsPath ?? join(getAgentDir(), "models.json"));
+		const modelsPath = options.modelsPath === null ? undefined : (options.modelsPath ?? getModelsPath());
+		const isManagedModelsInput = modelsPath !== undefined && modelsPath === getVivariumModelsPath();
 		const config = await ModelConfig.load(modelsPath);
 		const modelsStore =
 			options.modelsStore ??
 			(modelsPath
-				? new FileModelsStore(options.modelsStorePath ?? join(dirname(modelsPath), "models-store.json"))
+				? new FileModelsStore(options.modelsStorePath ?? resolveModelsStorePath(modelsPath, isManagedModelsInput))
 				: new InMemoryCodingAgentModelsStore());
 		const builtinModelDataGeneratedAt = builtinProviderCatalog.getBuiltinModelDataGeneratedAt();
 		const providers = builtinProviderCatalog

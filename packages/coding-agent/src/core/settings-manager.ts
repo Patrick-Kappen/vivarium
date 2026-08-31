@@ -5,7 +5,7 @@ import { randomUUID } from "crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
 import { dirname, join } from "path";
 import lockfile from "proper-lockfile";
-import { CONFIG_DIR_NAME, getAgentDir } from "../config.ts";
+import { CONFIG_DIR_NAME, getAgentDir, getVivariumSettingsPath, isVivariumManaged } from "../config.ts";
 import { normalizePath, resolvePath } from "../utils/paths.ts";
 import { stripBom } from "../utils/text.ts";
 import { DEFAULT_HTTP_IDLE_TIMEOUT_MS, parseHttpIdleTimeoutMs } from "./http-dispatcher.ts";
@@ -188,6 +188,8 @@ export type SettingsScope = "global" | "project";
 
 export interface SettingsManagerCreateOptions {
 	projectTrusted?: boolean;
+	/** Override the global settings file path; defaults to <agentDir>/settings.json or VIVARIUM_SETTINGS_PATH. */
+	settingsPath?: string;
 }
 
 export interface SettingsStorage {
@@ -213,12 +215,14 @@ function toSettingsError(scope: SettingsScope, error: unknown, path?: string): S
 export class FileSettingsStorage implements SettingsStorage {
 	private globalSettingsPath: string;
 	private projectSettingsPath: string;
+	private readOnlyGlobal: boolean;
 
-	constructor(cwd: string, agentDir: string) {
+	constructor(cwd: string, agentDir: string, globalSettingsPath?: string, readOnlyGlobal = false) {
 		const resolvedCwd = resolvePath(cwd);
 		const resolvedAgentDir = resolvePath(agentDir);
-		this.globalSettingsPath = join(resolvedAgentDir, "settings.json");
+		this.globalSettingsPath = globalSettingsPath ?? join(resolvedAgentDir, "settings.json");
 		this.projectSettingsPath = join(resolvedCwd, CONFIG_DIR_NAME, "settings.json");
+		this.readOnlyGlobal = readOnlyGlobal;
 	}
 
 	private acquireLockSyncWithRetry(path: string): () => void {
@@ -262,6 +266,11 @@ export class FileSettingsStorage implements SettingsStorage {
 			const current = fileExists ? readFileSync(path, "utf-8") : undefined;
 			const next = fn(current);
 			if (next !== undefined) {
+				if (scope === "global" && this.readOnlyGlobal) {
+					throw new Error(
+						`Cannot persist settings: ${this.globalSettingsPath} is a read-only managed configuration input (VIVARIUM_MANAGED=1)`,
+					);
+				}
 				// Only create directory when we actually need to write
 				if (!existsSync(dir)) {
 					mkdirSync(dir, { recursive: true });
@@ -341,9 +350,13 @@ export class SettingsManager {
 	): SettingsManager {
 		const resolvedCwd = resolvePath(cwd);
 		const resolvedAgentDir = resolvePath(agentDir);
-		const storage = new FileSettingsStorage(resolvedCwd, resolvedAgentDir);
+		const vivariumSettingsPath = getVivariumSettingsPath();
+		const globalSettingsPath =
+			options.settingsPath ?? vivariumSettingsPath ?? join(resolvedAgentDir, "settings.json");
+		const readOnlyGlobal = isVivariumManaged() && vivariumSettingsPath !== undefined;
+		const storage = new FileSettingsStorage(resolvedCwd, resolvedAgentDir, globalSettingsPath, readOnlyGlobal);
 		return SettingsManager.fromStorageWithPaths(storage, options, {
-			global: join(resolvedAgentDir, "settings.json"),
+			global: globalSettingsPath,
 			project: join(resolvedCwd, CONFIG_DIR_NAME, "settings.json"),
 		});
 	}

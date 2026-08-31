@@ -517,6 +517,45 @@ export function getShareViewerUrl(gistId: string): string {
 }
 
 // =============================================================================
+// Managed Config Inputs (Vivarium)
+// =============================================================================
+//
+// Vivarium separates read-only, operator-supplied configuration inputs from the
+// writable runtime agent directory (PI_CODING_AGENT_DIR, default ~/.pi/agent):
+//
+// - VIVARIUM_SETTINGS_PATH and VIVARIUM_MODELS_PATH select explicit settings.json
+//   and models.json inputs independently of PI_CODING_AGENT_DIR.
+// - VIVARIUM_MANAGED=1 makes those selected inputs read-only: Pi loads them but
+//   must not persist /settings changes, saved model defaults, or saved thinking
+//   defaults into them.
+// - PI_CODING_AGENT_DIR keeps auth.json, trust state, and models-store/provider
+//   caches; those remain writable runtime state.
+//
+// When these variables are absent, all paths resolve exactly as upstream Pi
+// does (settings.json and models.json inside the agent directory).
+
+const ENV_VIVARIUM_MANAGED = "VIVARIUM_MANAGED";
+const ENV_VIVARIUM_SETTINGS_PATH = "VIVARIUM_SETTINGS_PATH";
+const ENV_VIVARIUM_MODELS_PATH = "VIVARIUM_MODELS_PATH";
+
+/** Managed mode is enabled when VIVARIUM_MANAGED=1. */
+export function isVivariumManaged(): boolean {
+	return process.env[ENV_VIVARIUM_MANAGED] === "1";
+}
+
+/** Explicit read-only settings.json input selected by VIVARIUM_SETTINGS_PATH, or undefined. */
+export function getVivariumSettingsPath(): string | undefined {
+	const envDir = process.env[ENV_VIVARIUM_SETTINGS_PATH];
+	return envDir ? expandTildePath(envDir) : undefined;
+}
+
+/** Explicit read-only models.json input selected by VIVARIUM_MODELS_PATH, or undefined. */
+export function getVivariumModelsPath(): string | undefined {
+	const envDir = process.env[ENV_VIVARIUM_MODELS_PATH];
+	return envDir ? expandTildePath(envDir) : undefined;
+}
+
+// =============================================================================
 // User Config Paths (~/.pi/agent/*)
 // =============================================================================
 
@@ -534,9 +573,9 @@ export function getCustomThemesDir(): string {
 	return join(getAgentDir(), "themes");
 }
 
-/** Get path to models.json */
+/** Get path to models.json (VIVARIUM_MODELS_PATH overrides the agent-dir default) */
 export function getModelsPath(): string {
-	return join(getAgentDir(), "models.json");
+	return getVivariumModelsPath() ?? join(getAgentDir(), "models.json");
 }
 
 /** Get path to auth.json */
@@ -544,9 +583,9 @@ export function getAuthPath(): string {
 	return join(getAgentDir(), "auth.json");
 }
 
-/** Get path to settings.json */
+/** Get path to settings.json (VIVARIUM_SETTINGS_PATH overrides the agent-dir default) */
 export function getSettingsPath(): string {
-	return join(getAgentDir(), "settings.json");
+	return getVivariumSettingsPath() ?? join(getAgentDir(), "settings.json");
 }
 
 /** Get path to tools directory */
