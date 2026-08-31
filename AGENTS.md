@@ -1,4 +1,28 @@
-# Development Rules
+# Vivarium fork rules
+
+This repository is the downstream Vivarium engine fork. When checked out in the
+shared workspace, read `../AGENTS.md` for repository boundaries. These fork
+rules override conflicting inherited upstream rules; the remaining development
+rules below continue to govern engine code.
+
+- `origin` is `Patrick-Kappen/vivarium`; `upstream` is
+  `earendil-works/pi`. Keep upstream push disabled in local working copies.
+- This repository owns engine source changes only. Warden owns Nix packaging,
+  instances and integrations; Glasshouse owns sandbox execution and its
+  protocol. Their local contracts are in `../warden/docs/` and
+  `../glasshouse/docs/` when those siblings are present.
+- Keep generally useful changes as focused commits suitable for upstream
+  submission. Mark intentional product divergence clearly and preserve upstream
+  history.
+- Retain upstream package names and internal APIs unless a reviewed Vivarium
+  migration explicitly changes them; repository and release branding alone do
+  not justify broad renames.
+- Do not run the inherited upstream release procedure, publish
+  `@earendil-works/*` packages, or update upstream release markers from this
+  fork. A Vivarium release process must be defined separately before use.
+- Never add Warden or Glasshouse NAS paths as build inputs.
+
+# Inherited engine development rules
 
 ## Conversational Style
 
