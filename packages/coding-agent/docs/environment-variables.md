@@ -80,9 +80,9 @@ These variables are read by Pi itself:
 |----------|-------------|
 | `PI_CODING_AGENT_DIR` | Override the config directory; default is `~/.pi/agent` |
 | `PI_CODING_AGENT_SESSION_DIR` | Override session storage; overridden by `--session-dir` |
-| `VIVARIUM_SETTINGS_PATH` | Select an explicit read-only `settings.json` input independent of `PI_CODING_AGENT_DIR`; see [Managed configuration inputs](#managed-configuration-inputs) |
-| `VIVARIUM_MODELS_PATH` | Select an explicit read-only `models.json` input independent of `PI_CODING_AGENT_DIR`; see [Managed configuration inputs](#managed-configuration-inputs) |
-| `VIVARIUM_MANAGED` | Set to `1` to treat the selected settings and models inputs as read-only; see [Managed configuration inputs](#managed-configuration-inputs) |
+| `VIVARIUM_SETTINGS_PATH` | Select an explicit `settings.json` input independent of `PI_CODING_AGENT_DIR`; see [Managed configuration inputs](#managed-configuration-inputs) |
+| `VIVARIUM_MODELS_PATH` | Select an explicit `models.json` input independent of `PI_CODING_AGENT_DIR`; see [Managed configuration inputs](#managed-configuration-inputs) |
+| `VIVARIUM_MANAGED` | Set to `1` to mark the current profile externally managed and make its effective global settings read-only; see [Managed configuration inputs](#managed-configuration-inputs) |
 | `PI_PACKAGE_DIR` | Override the package directory, useful for Nix/Guix store paths |
 | `PI_OFFLINE` | Disable startup network operations, including update checks, package updates, and install/update telemetry |
 | `PI_SKIP_VERSION_CHECK` | Disable the `pi.dev` latest-version request |
@@ -107,7 +107,7 @@ Vivarium deployments can separate operator-supplied configuration from writable 
 |----------|----------|
 | `VIVARIUM_SETTINGS_PATH` | Absolute path to the `settings.json` input. Pi loads global settings from this file instead of `PI_CODING_AGENT_DIR/settings.json`. |
 | `VIVARIUM_MODELS_PATH` | Absolute path to the `models.json` input. Pi loads the model configuration from this file instead of `PI_CODING_AGENT_DIR/models.json`, including for `pi update --models`. The `models-store.json` cache stays in the writable agent directory. |
-| `VIVARIUM_MANAGED` | `1` makes the selected settings and models inputs read-only. Changes made through `/settings`, saved model defaults (Ctrl+S in `/model`), and saved thinking defaults (Ctrl+S in `/thinking`) apply for the session but are never written back into the managed files; Pi records a settings error instead. In managed mode Pi also does not discover a global `SYSTEM.md` or `APPEND_SYSTEM.md` from the writable agent directory — trusted project `.pi` files still apply. |
+| `VIVARIUM_MANAGED` | `1` marks the current profile as externally managed. Its effective global settings input is read-only, whether selected with `VIVARIUM_SETTINGS_PATH`, supplied by an embedding caller, or resolved under `PI_CODING_AGENT_DIR`. Changes made through `/settings`, saved model defaults (Ctrl+S in `/model`), and saved thinking defaults (Ctrl+S in `/thinking`) apply for the session but are never persisted; Pi records a settings error instead. Managed mode also does not discover a global `SYSTEM.md` or `APPEND_SYSTEM.md` from the writable agent directory — trusted project `.pi` files still apply. |
 
 A path selected through `VIVARIUM_SETTINGS_PATH` or `VIVARIUM_MODELS_PATH`
 must exist. Pi treats a missing explicit input as a deployment error and does
@@ -134,4 +134,4 @@ credential files are reported and preserved; a concurrent startup that already
 created `auth.json` is treated as initialized rather than as a migration
 failure.
 
-When these variables are absent, Pi behaves exactly as upstream: `settings.json` and `models.json` are read from and written to the agent directory, and global `SYSTEM.md`/`APPEND_SYSTEM.md` files in the agent directory are honored.
+`VIVARIUM_SETTINGS_PATH` and `VIVARIUM_MODELS_PATH` select inputs; they do not enable managed mutation policy by themselves. `VIVARIUM_MODELS_PATH` also keeps the writable `models-store.json` cache in the agent directory instead of beside the explicit model input. When all three variables are absent, Pi behaves exactly as upstream: `settings.json` and `models.json` are read from and written to the agent directory, and global `SYSTEM.md`/`APPEND_SYSTEM.md` files in the agent directory are honored.

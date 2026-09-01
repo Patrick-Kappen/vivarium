@@ -11,7 +11,7 @@ Edit directly or use `/settings` for common options. To save startup model defau
 
 ## Managed Settings Input
 
-Vivarium deployments can point Pi at an explicit, read-only `settings.json` input with the `VIVARIUM_SETTINGS_PATH` environment variable, independent of `PI_CODING_AGENT_DIR`. Setting `VIVARIUM_MANAGED=1` makes that input read-only: `/settings` changes, saved model defaults (`/model` + Ctrl+S), and saved thinking defaults (`/thinking` + Ctrl+S) apply for the current session but are not written back into the managed file, and Pi records a settings error instead. Project `.pi/settings.json` files remain writable. See [Environment variables: Managed configuration inputs](environment-variables.md#managed-configuration-inputs).
+Vivarium deployments can point Pi at an explicit `settings.json` input with the `VIVARIUM_SETTINGS_PATH` environment variable, independent of `PI_CODING_AGENT_DIR`. Setting `VIVARIUM_MANAGED=1` makes the effective global settings input read-only, including the agent-directory default or a path supplied by an embedding caller: `/settings` changes, saved model defaults (`/model` + Ctrl+S), and saved thinking defaults (`/thinking` + Ctrl+S) apply for the current session but are not written back, and Pi records a settings error instead. Project `.pi/settings.json` files remain writable. See [Environment variables: Managed configuration inputs](environment-variables.md#managed-configuration-inputs).
 
 ## Project Trust
 

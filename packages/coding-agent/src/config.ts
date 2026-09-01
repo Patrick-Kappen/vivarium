@@ -525,9 +525,10 @@ export function getShareViewerUrl(gistId: string): string {
 //
 // - VIVARIUM_SETTINGS_PATH and VIVARIUM_MODELS_PATH select explicit settings.json
 //   and models.json inputs independently of PI_CODING_AGENT_DIR.
-// - VIVARIUM_MANAGED=1 makes those selected inputs read-only: Pi loads them but
-//   must not persist /settings changes, saved model defaults, or saved thinking
-//   defaults into them.
+// - VIVARIUM_MANAGED=1 makes the effective global settings input read-only,
+//   whether selected explicitly or from PI_CODING_AGENT_DIR. Pi loads settings
+//   but must not persist /settings changes, saved model defaults, or saved
+//   thinking defaults into them.
 // - PI_CODING_AGENT_DIR keeps auth.json, trust state, and models-store/provider
 //   caches; those remain writable runtime state.
 //
@@ -543,13 +544,13 @@ export function isVivariumManaged(): boolean {
 	return process.env[ENV_VIVARIUM_MANAGED] === "1";
 }
 
-/** Explicit read-only settings.json input selected by VIVARIUM_SETTINGS_PATH, or undefined. */
+/** Explicit settings.json input selected by VIVARIUM_SETTINGS_PATH, or undefined. */
 export function getVivariumSettingsPath(): string | undefined {
 	const envDir = process.env[ENV_VIVARIUM_SETTINGS_PATH];
 	return envDir ? expandTildePath(envDir) : undefined;
 }
 
-/** Explicit read-only models.json input selected by VIVARIUM_MODELS_PATH, or undefined. */
+/** Explicit models.json input selected by VIVARIUM_MODELS_PATH, or undefined. */
 export function getVivariumModelsPath(): string | undefined {
 	const envDir = process.env[ENV_VIVARIUM_MODELS_PATH];
 	return envDir ? expandTildePath(envDir) : undefined;
