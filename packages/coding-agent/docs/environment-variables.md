@@ -124,6 +124,9 @@ non-interactive session stops without changing auth state and directs the
 operator to `pi auth migrate`. Metadata commands such as `--help`, `--version`
 and `--list-models` neither prompt nor initialize `auth.json`. When no legacy
 credentials exist, the normal auth runtime creates an empty owner-only file when
-it is first needed.
+it is first needed. Empty legacy objects do not block startup. Malformed legacy
+credential files are reported and preserved; a concurrent startup that already
+created `auth.json` is treated as initialized rather than as a migration
+failure.
 
 When these variables are absent, Pi behaves exactly as upstream: `settings.json` and `models.json` are read from and written to the agent directory, and global `SYSTEM.md`/`APPEND_SYSTEM.md` files in the agent directory are honored.

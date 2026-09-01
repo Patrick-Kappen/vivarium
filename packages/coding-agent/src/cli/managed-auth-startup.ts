@@ -4,7 +4,7 @@ import type { AuthMigrationState } from "../migrations.ts";
 export type ManagedAuthStartupAction = "none" | "prompt" | "error";
 
 export function requiresManagedAuthMigration(managed: boolean, authMigrationState: AuthMigrationState): boolean {
-	return managed && authMigrationState === "legacy";
+	return managed && (authMigrationState === "legacy" || authMigrationState === "invalid");
 }
 
 export function resolveManagedAuthStartupAction(options: {

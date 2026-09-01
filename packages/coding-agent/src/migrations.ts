@@ -14,19 +14,34 @@ const MIGRATION_GUIDE_URL =
 const EXTENSIONS_DOC_URL =
 	"https://github.com/earendil-works/pi-mono/blob/main/packages/coding-agent/docs/extensions.md";
 
-export type AuthMigrationState = "initialized" | "legacy" | "none";
+export type AuthMigrationState = "initialized" | "legacy" | "invalid" | "none";
+export type AuthMigrationResult =
+	| { status: "migrated"; providers: string[] }
+	| { status: "already_initialized" }
+	| { status: "no_credentials" }
+	| { status: "invalid_legacy" };
 
 export function getAuthMigrationState(): AuthMigrationState {
 	const agentDir = getAgentDir();
 	if (existsSync(join(agentDir, "auth.json"))) return "initialized";
-	if (existsSync(join(agentDir, "oauth.json"))) return "legacy";
+
+	const oauthPath = join(agentDir, "oauth.json");
+	if (existsSync(oauthPath)) {
+		try {
+			const oauth: unknown = JSON.parse(stripBom(readFileSync(oauthPath, "utf-8")));
+			if (typeof oauth !== "object" || oauth === null || Array.isArray(oauth)) return "invalid";
+			if (Object.keys(oauth).length > 0) return "legacy";
+		} catch {
+			return "invalid";
+		}
+	}
 
 	try {
 		const settings = JSON.parse(stripBom(readFileSync(join(agentDir, "settings.json"), "utf-8"))) as unknown;
 		if (typeof settings !== "object" || settings === null || Array.isArray(settings)) return "none";
 		const apiKeys = (settings as Record<string, unknown>).apiKeys;
 		if (typeof apiKeys !== "object" || apiKeys === null || Array.isArray(apiKeys)) return "none";
-		return Object.values(apiKeys).some((value) => typeof value === "string") ? "legacy" : "none";
+		return Object.values(apiKeys).some((value) => typeof value === "string" && value.length > 0) ? "legacy" : "none";
 	} catch {
 		return "none";
 	}
@@ -45,34 +60,40 @@ export function initializeEmptyAuthJson(): void {
 /**
  * Migrate legacy oauth.json and settings.json apiKeys to auth.json.
  *
- * @returns Array of provider names that were migrated
+ * @returns A result that distinguishes migration, concurrent initialization,
+ * missing credentials, and invalid legacy sources.
  */
-export function migrateAuthToAuthJson(): string[] {
+export function migrateAuthToAuthJson(): AuthMigrationResult {
 	const agentDir = getAgentDir();
 	const authPath = join(agentDir, "auth.json");
 	const oauthPath = join(agentDir, "oauth.json");
 	const settingsPath = join(agentDir, "settings.json");
 
-	// Skip if auth.json already exists
-	if (existsSync(authPath)) return [];
+	// Another startup may have initialized auth state before this one runs.
+	if (existsSync(authPath)) return { status: "already_initialized" };
 
 	const migrated: Record<string, unknown> = {};
 	const providers: string[] = [];
 	let migrateOauthFile = false;
 	let migratedSettings: string | undefined;
+	let invalidLegacySource = false;
 
 	// Read oauth.json without changing it. Legacy files are cleaned up only after
 	// auth.json has been created successfully, so a failed import does not lose credentials.
 	if (existsSync(oauthPath)) {
 		try {
-			const oauth = JSON.parse(stripBom(readFileSync(oauthPath, "utf-8")));
-			for (const [provider, cred] of Object.entries(oauth)) {
-				migrated[provider] = { type: "oauth", ...(cred as object) };
-				providers.push(provider);
+			const oauth: unknown = JSON.parse(stripBom(readFileSync(oauthPath, "utf-8")));
+			if (typeof oauth !== "object" || oauth === null || Array.isArray(oauth)) {
+				invalidLegacySource = true;
+			} else {
+				for (const [provider, cred] of Object.entries(oauth)) {
+					migrated[provider] = { type: "oauth", ...(cred as object) };
+					providers.push(provider);
+				}
+				migrateOauthFile = providers.length > 0;
 			}
-			migrateOauthFile = true;
 		} catch {
-			// Skip on error
+			invalidLegacySource = true;
 		}
 	}
 
@@ -83,7 +104,7 @@ export function migrateAuthToAuthJson(): string[] {
 			const settings = JSON.parse(stripBom(content));
 			if (settings.apiKeys && typeof settings.apiKeys === "object") {
 				for (const [provider, key] of Object.entries(settings.apiKeys)) {
-					if (!migrated[provider] && typeof key === "string") {
+					if (!migrated[provider] && typeof key === "string" && key.length > 0) {
 						migrated[provider] = { type: "api_key", key };
 						providers.push(provider);
 					}
@@ -92,11 +113,12 @@ export function migrateAuthToAuthJson(): string[] {
 				migratedSettings = JSON.stringify(settings, null, 2);
 			}
 		} catch {
-			// Skip on error
+			invalidLegacySource = true;
 		}
 	}
 
-	if (Object.keys(migrated).length === 0) return [];
+	if (invalidLegacySource) return { status: "invalid_legacy" };
+	if (Object.keys(migrated).length === 0) return { status: "no_credentials" };
 
 	mkdirSync(dirname(authPath), { recursive: true, mode: 0o700 });
 	try {
@@ -106,7 +128,7 @@ export function migrateAuthToAuthJson(): string[] {
 			mode: 0o600,
 		});
 	} catch (error) {
-		if ((error as NodeJS.ErrnoException).code === "EEXIST") return [];
+		if ((error as NodeJS.ErrnoException).code === "EEXIST") return { status: "already_initialized" };
 		throw error;
 	}
 
@@ -125,7 +147,7 @@ export function migrateAuthToAuthJson(): string[] {
 		}
 	}
 
-	return providers;
+	return { status: "migrated", providers };
 }
 
 /**
@@ -365,7 +387,8 @@ export function runMigrations(
 	migratedAuthProviders: string[];
 	deprecationWarnings: string[];
 } {
-	const migratedAuthProviders = options.migrateAuth === false ? [] : migrateAuthToAuthJson();
+	const authMigration = options.migrateAuth === false ? undefined : migrateAuthToAuthJson();
+	const migratedAuthProviders = authMigration?.status === "migrated" ? authMigration.providers : [];
 	migrateSessionsFromAgentRoot();
 	migrateToolsToBin();
 	migrateKeybindingsConfigFile();
