@@ -6,10 +6,15 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { parseArgs } from "../src/cli/args.ts";
 import { checkProviderAuth, createAuthCheckModelRuntime, getProviderCredential } from "../src/cli/auth-check.ts";
 import { parseAuthCommand } from "../src/cli/auth-command.ts";
+import { ENV_AGENT_DIR } from "../src/config.ts";
 import { AuthStorage, ReadOnlyAuthStorage } from "../src/core/auth-storage.ts";
 import { ModelRuntime } from "../src/core/model-runtime.ts";
+import { clearApiKeyCache } from "../src/core/provider-composer.ts";
+import { main } from "../src/main.ts";
 
 const tempDir = join(tmpdir(), `pi-test-auth-check-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+const originalOpenAiApiKey = process.env.OPENAI_API_KEY;
+const originalAgentDir = process.env[ENV_AGENT_DIR];
 
 async function createRuntime(credentials: AuthStorage | ReadOnlyAuthStorage): Promise<ModelRuntime> {
 	return ModelRuntime.create({
@@ -29,6 +34,13 @@ describe("auth check command", () => {
 
 	afterEach(() => {
 		if (existsSync(tempDir)) rmSync(tempDir, { recursive: true });
+		if (originalOpenAiApiKey === undefined) delete process.env.OPENAI_API_KEY;
+		else process.env.OPENAI_API_KEY = originalOpenAiApiKey;
+		if (originalAgentDir === undefined) delete process.env[ENV_AGENT_DIR];
+		else process.env[ENV_AGENT_DIR] = originalAgentDir;
+		process.exitCode = undefined;
+		clearApiKeyCache();
+		vi.restoreAllMocks();
 	});
 
 	test("reports a configured provider as ready", async () => {
@@ -38,7 +50,70 @@ describe("auth check command", () => {
 			status: "ready",
 			provider: "openai",
 			authType: "api_key",
+			source: "stored",
 		});
+	});
+
+	test("reports the active credential source without exposing credential values", async () => {
+		process.env.OPENAI_API_KEY = "synthetic-environment-key";
+		clearApiKeyCache();
+
+		const environmentRuntime = await createRuntime(AuthStorage.inMemory());
+		const environmentResult = await checkProviderAuth(parseArgs(["--provider", "openai"]), environmentRuntime);
+		expect(environmentResult).toEqual({
+			status: "ready",
+			provider: "openai",
+			authType: "api_key",
+			source: "environment",
+		});
+		expect(JSON.stringify(environmentResult)).not.toContain("synthetic-environment-key");
+
+		const storedRuntime = await createRuntime(
+			AuthStorage.inMemory({ openai: { type: "api_key", key: "synthetic-stored-key" } }),
+		);
+		const storedResult = await checkProviderAuth(parseArgs(["--provider", "openai"]), storedRuntime);
+		expect(storedResult).toEqual({
+			status: "ready",
+			provider: "openai",
+			authType: "api_key",
+			source: "stored",
+		});
+		expect(JSON.stringify(storedResult)).not.toContain("synthetic-stored-key");
+		expect(JSON.stringify(storedResult)).not.toContain("synthetic-environment-key");
+
+		await storedRuntime.logout("openai");
+		await expect(checkProviderAuth(parseArgs(["--provider", "openai"]), storedRuntime)).resolves.toEqual({
+			status: "ready",
+			provider: "openai",
+			authType: "api_key",
+			source: "environment",
+		});
+	});
+
+	test("prints the source only in JSON while preserving plain status output", async () => {
+		process.env.OPENAI_API_KEY = "synthetic-cli-environment-key";
+		process.env[ENV_AGENT_DIR] = join(tempDir, "agent");
+		clearApiKeyCache();
+		const writes: string[] = [];
+		vi.spyOn(process.stdout, "write").mockImplementation((chunk) => {
+			writes.push(String(chunk));
+			return true;
+		});
+
+		await main(["auth", "check", "--provider", "openai", "--no-refresh", "--json"]);
+		const json = JSON.parse(writes.join(""));
+		expect(json).toEqual({
+			status: "ready",
+			provider: "openai",
+			authType: "api_key",
+			source: "environment",
+		});
+		expect(writes.join("")).not.toContain("synthetic-cli-environment-key");
+		expect(existsSync(join(tempDir, "agent", "auth.json"))).toBe(false);
+
+		writes.length = 0;
+		await main(["auth", "check", "--provider", "openai", "--no-refresh"]);
+		expect(writes.join("")).toBe("ready\n");
 	});
 
 	test("resolves the provider from --model", async () => {
@@ -48,6 +123,7 @@ describe("auth check command", () => {
 			status: "ready",
 			provider: "openai",
 			authType: "api_key",
+			source: "stored",
 		});
 		await expect(
 			checkProviderAuth(parseArgs(["--provider", "openai", "--model", "gpt-5.5"]), runtime),
@@ -97,6 +173,31 @@ describe("auth check command", () => {
 			status: "ready",
 		});
 		expect(refresh).toHaveBeenCalledOnce();
+	});
+
+	test("reports provider refresh errors as invalid", async () => {
+		const runtime = await createRuntime(AuthStorage.inMemory({ openai: { type: "api_key", key: "test-key" } }));
+		vi.spyOn(runtime, "refresh").mockResolvedValue({
+			aborted: false,
+			errors: new Map([["openai", new Error("synthetic refresh failure")]]),
+		});
+
+		await expect(checkProviderAuth(parseArgs(["--provider", "openai"]), runtime)).resolves.toEqual({
+			status: "invalid",
+			provider: "openai",
+			reason: "invalid_state",
+		});
+	});
+
+	test("reports runtime errors introduced during refresh as invalid", async () => {
+		const runtime = await createRuntime(AuthStorage.inMemory({ openai: { type: "api_key", key: "test-key" } }));
+		vi.spyOn(runtime, "getError").mockReturnValueOnce(undefined).mockReturnValue("synthetic runtime failure");
+
+		await expect(checkProviderAuth(parseArgs(["--provider", "openai"]), runtime)).resolves.toEqual({
+			status: "invalid",
+			provider: "openai",
+			reason: "invalid_state",
+		});
 	});
 
 	test("reports an unknown provider as not ready", async () => {
