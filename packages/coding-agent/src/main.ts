@@ -141,8 +141,12 @@ function toPrintOutputMode(appMode: AppMode): Exclude<Mode, "rpc"> {
 	return appMode === "json" ? "json" : "text";
 }
 
+function isRuntimeMetadataCommand(parsed: Args): boolean {
+	return parsed.help === true || parsed.listModels !== undefined;
+}
+
 function isPlainRuntimeMetadataCommand(parsed: Args): boolean {
-	return !parsed.print && parsed.mode === undefined && (parsed.help === true || parsed.listModels !== undefined);
+	return !parsed.print && parsed.mode === undefined && isRuntimeMetadataCommand(parsed);
 }
 
 async function runAuthCommand(args: string[]): Promise<boolean> {
@@ -735,7 +739,7 @@ export async function main(args: string[], options?: MainOptions) {
 
 	const managedAuthInitialization = await initializeManagedAuthForStartup({
 		appMode,
-		metadataCommand: isPlainRuntimeMetadataCommand(parsed),
+		metadataCommand: isRuntimeMetadataCommand(parsed),
 		settingsManager: bootstrapSettingsManager,
 	});
 	if (managedAuthInitialization.exitCode !== undefined) {
@@ -830,7 +834,7 @@ export async function main(args: string[], options?: MainOptions) {
 				(!hasTrustRequiringResources || trustStore.get(cwd) === true));
 		const runtimeSettingsManager = SettingsManager.create(cwd, agentDir, { projectTrusted });
 		const initialModelRuntime =
-			isInitialRuntime && isPlainRuntimeMetadataCommand(parsed)
+			isInitialRuntime && isRuntimeMetadataCommand(parsed)
 				? await ModelRuntime.create({
 						credentials: new ReadOnlyAuthStorage(),
 						allowModelNetwork: false,

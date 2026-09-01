@@ -1,6 +1,7 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { spawn } from "node:child_process";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { parseAuthCommand } from "../src/cli/auth-command.ts";
 import { requiresManagedAuthMigration, resolveManagedAuthStartupAction } from "../src/cli/managed-auth-startup.ts";
@@ -11,6 +12,9 @@ import {
 	migrateAuthToAuthJson,
 	runMigrations,
 } from "../src/migrations.ts";
+
+const cliPath = resolve(__dirname, "../src/cli.ts");
+const tsxLoaderPath = resolve(__dirname, "../../../node_modules/tsx/dist/loader.mjs");
 
 describe("managed auth initialization", () => {
 	const temporaryDirectories: string[] = [];
@@ -29,6 +33,51 @@ describe("managed auth initialization", () => {
 		temporaryDirectories.push(directory);
 		process.env[ENV_AGENT_DIR] = directory;
 		return directory;
+	}
+
+	async function runManagedCli(
+		args: string[],
+		legacy: boolean,
+	): Promise<{ authPath: string; code: number | null; stderr: string; stdout: string }> {
+		const root = mkdtempSync(join(tmpdir(), "pi-managed-auth-cli-"));
+		temporaryDirectories.push(root);
+		const agentDir = join(root, "agent");
+		const projectDir = join(root, "project");
+		mkdirSync(agentDir, { recursive: true });
+		mkdirSync(projectDir, { recursive: true });
+		if (legacy) {
+			writeFileSync(
+				join(agentDir, "oauth.json"),
+				JSON.stringify({ openai: { access: "synthetic-access", refresh: "synthetic-refresh", expires: 1 } }),
+				"utf8",
+			);
+		}
+
+		return await new Promise((resolvePromise, reject) => {
+			const child = spawn(process.execPath, ["--import", tsxLoaderPath, cliPath, ...args], {
+				cwd: projectDir,
+				env: {
+					...process.env,
+					[ENV_AGENT_DIR]: agentDir,
+					PI_OFFLINE: "1",
+					TSX_TSCONFIG_PATH: resolve(__dirname, "../../../tsconfig.json"),
+					VIVARIUM_MANAGED: "1",
+				},
+				stdio: ["ignore", "pipe", "pipe"],
+			});
+			let stdout = "";
+			let stderr = "";
+			child.stdout.on("data", (chunk) => {
+				stdout += chunk.toString();
+			});
+			child.stderr.on("data", (chunk) => {
+				stderr += chunk.toString();
+			});
+			child.on("error", reject);
+			child.on("close", (code) => {
+				resolvePromise({ authPath: join(agentDir, "auth.json"), code, stderr, stdout });
+			});
+		});
 	}
 
 	it("distinguishes initialized, legacy, and new auth state", () => {
@@ -160,6 +209,20 @@ describe("managed auth initialization", () => {
 			);
 		},
 	);
+
+	it.each([
+		["new", false, ["--mode", "json", "--help"], "Usage:"],
+		["legacy", true, ["--mode", "json", "--help"], "Usage:"],
+		["new", false, ["--list-models"], "models"],
+		["legacy", true, ["--list-models"], "models"],
+	] as const)("keeps %s managed metadata read-only for %j", async (_state, legacy, args, expectedOutput) => {
+		const result = await runManagedCli([...args], legacy);
+
+		expect(result.code).toBe(0);
+		expect(`${result.stdout}\n${result.stderr}`.toLowerCase()).toContain(expectedOutput.toLowerCase());
+		expect(result.stderr).not.toContain("Legacy credentials were found");
+		expect(existsSync(result.authPath)).toBe(false);
+	});
 
 	it("parses the explicit auth migration command without provider arguments", () => {
 		expect(parseAuthCommand(["auth", "migrate"])).toEqual({
