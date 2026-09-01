@@ -194,6 +194,54 @@ describe("managed configuration inputs", () => {
 			expect(readFileSync(statePath, "utf-8")).toBe(invalidState);
 		});
 
+		it("keeps implicit agent-dir global settings read-only in managed mode", async () => {
+			const settingsPath = join(agentDir, "settings.json");
+			const contents = '{"theme":"dark","defaultModel":"baseline-model"}\n';
+			writeFileSync(settingsPath, contents);
+			setEnv(ENV_SETTINGS_PATH, undefined);
+			setEnv(ENV_MANAGED, "1");
+
+			const manager = SettingsManager.create(cwd, agentDir);
+			expect(manager.getDefaultModel()).toBe("baseline-model");
+			manager.setDefaultModel("session-model");
+			await manager.flush();
+
+			expect(manager.getDefaultModel()).toBe("session-model");
+			expect(readFileSync(settingsPath, "utf8")).toBe(contents);
+			expect(existsSync(`${settingsPath}.lock`)).toBe(false);
+			expect(manager.drainErrors()).toMatchObject([
+				{
+					scope: "global",
+					path: settingsPath,
+				},
+			]);
+		});
+
+		it("keeps a caller-supplied global settings path read-only in managed mode", async () => {
+			const envSettingsPath = createManagedSettings();
+			const callerSettingsPath = join(tempDir, "caller-settings.json");
+			const callerContents = '{"theme":"light","defaultModel":"caller-model"}\n';
+			writeFileSync(callerSettingsPath, callerContents);
+			setEnv(ENV_SETTINGS_PATH, envSettingsPath);
+			setEnv(ENV_MANAGED, "1");
+
+			const manager = SettingsManager.create(cwd, agentDir, { settingsPath: callerSettingsPath });
+			expect(manager.getGlobalSettings().theme).toBe("light");
+			expect(manager.getDefaultModel()).toBe("caller-model");
+			manager.setDefaultModel("session-model");
+			await manager.flush();
+
+			expect(readFileSync(callerSettingsPath, "utf8")).toBe(callerContents);
+			expect(JSON.parse(readFileSync(envSettingsPath, "utf8"))).toMatchObject({ defaultModel: "baseline-model" });
+			expect(existsSync(`${callerSettingsPath}.lock`)).toBe(false);
+			expect(manager.drainErrors()).toMatchObject([
+				{
+					scope: "global",
+					path: callerSettingsPath,
+				},
+			]);
+		});
+
 		it("refuses to persist saved model and thinking defaults into managed settings", async () => {
 			const settingsPath = createManagedSettings();
 			setEnv(ENV_SETTINGS_PATH, settingsPath);

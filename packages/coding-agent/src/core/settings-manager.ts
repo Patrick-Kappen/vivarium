@@ -409,7 +409,7 @@ export class SettingsManager {
 		const globalSettingsPath =
 			options.settingsPath ?? vivariumSettingsPath ?? join(resolvedAgentDir, "settings.json");
 		const usesExplicitVivariumInput = options.settingsPath === undefined && vivariumSettingsPath !== undefined;
-		const readOnlyGlobal = isVivariumManaged() && vivariumSettingsPath !== undefined;
+		const readOnlyGlobal = isVivariumManaged();
 		const storage = new FileSettingsStorage(
 			resolvedCwd,
 			resolvedAgentDir,
