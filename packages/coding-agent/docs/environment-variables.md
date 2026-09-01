@@ -109,4 +109,14 @@ Vivarium deployments can separate operator-supplied configuration from writable 
 | `VIVARIUM_MODELS_PATH` | Absolute path to the `models.json` input. Pi loads the model configuration from this file instead of `PI_CODING_AGENT_DIR/models.json`. The `models-store.json` cache stays in the writable agent directory. |
 | `VIVARIUM_MANAGED` | `1` makes the selected settings and models inputs read-only. Changes made through `/settings`, saved model defaults (Ctrl+S in `/model`), and saved thinking defaults (Ctrl+S in `/thinking`) apply for the session but are never written back into the managed files; Pi records a settings error instead. In managed mode Pi also does not discover a global `SYSTEM.md` or `APPEND_SYSTEM.md` from the writable agent directory — trusted project `.pi` files still apply. |
 
+Managed mode also makes legacy credential migration explicit. If `auth.json`
+is absent while the writable agent directory contains `oauth.json` or
+`settings.json.apiKeys`, an interactive session asks whether to import the
+legacy credentials, start with an empty `auth.json`, or cancel. A
+non-interactive session stops without changing auth state and directs the
+operator to `pi auth migrate`. Metadata commands such as `--help`, `--version`
+and `--list-models` neither prompt nor initialize `auth.json`. When no legacy
+credentials exist, the normal auth runtime creates an empty owner-only file when
+it is first needed.
+
 When these variables are absent, Pi behaves exactly as upstream: `settings.json` and `models.json` are read from and written to the agent directory, and global `SYSTEM.md`/`APPEND_SYSTEM.md` files in the agent directory are honored.
