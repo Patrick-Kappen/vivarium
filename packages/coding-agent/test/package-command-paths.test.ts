@@ -481,6 +481,31 @@ if (process.platform !== "win32") fs.chmodSync(piPath, 0o755);
 		expect(process.exitCode).toBeUndefined();
 	});
 
+	it("refreshes catalogs from the explicit managed models input", async () => {
+		const managedModelsPath = join(tempDir, "managed-models.json");
+		writeFileSync(managedModelsPath, JSON.stringify({ providers: {} }));
+		vi.stubEnv("VIVARIUM_MANAGED", "1");
+		vi.stubEnv("VIVARIUM_MODELS_PATH", managedModelsPath);
+		const refresh = vi.fn(async () => ({ aborted: false, errors: new Map<string, Error>() }));
+		const create = vi.spyOn(ModelRuntime, "create").mockResolvedValue({ refresh } as unknown as ModelRuntime);
+		vi.spyOn(console, "log").mockImplementation(() => {});
+
+		await expect(runPackageCommandDirectly(["update", "--models"])).resolves.toBeUndefined();
+
+		expect(create).toHaveBeenCalledWith({
+			authPath: join(agentDir, "auth.json"),
+			modelsPath: managedModelsPath,
+			allowModelNetwork: false,
+			signal: expect.any(AbortSignal),
+		});
+		expect(refresh).toHaveBeenCalledWith({
+			allowNetwork: true,
+			force: true,
+			signal: expect.any(AbortSignal),
+		});
+		expect(process.exitCode).toBeUndefined();
+	});
+
 	it("rejects update --models combined with another update target", async () => {
 		const create = vi.spyOn(ModelRuntime, "create");
 		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});

@@ -19,6 +19,7 @@ import {
 	CONFIG_DIR_NAME,
 	detectInstallMethod,
 	getAgentDir,
+	getModelsPath,
 	getPackageDir,
 	getSelfUpdateCommand,
 	getSelfUpdateUnavailableInstruction,
@@ -586,7 +587,7 @@ async function refreshModelCatalogs(agentDir: string): Promise<void> {
 	try {
 		const modelRuntime = await ModelRuntime.create({
 			authPath: join(agentDir, "auth.json"),
-			modelsPath: join(agentDir, "models.json"),
+			modelsPath: getModelsPath(),
 			allowModelNetwork: false,
 			signal: controller.signal,
 		});
