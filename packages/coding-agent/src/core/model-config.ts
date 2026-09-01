@@ -245,14 +245,17 @@ export class ModelConfig {
 		this.error = error;
 	}
 
-	static async load(modelsJsonPath: string | undefined): Promise<ModelConfig> {
+	static async load(modelsJsonPath: string | undefined, requireInput = false): Promise<ModelConfig> {
 		if (!modelsJsonPath) return new ModelConfig(new Map());
 		const path = normalizePath(modelsJsonPath);
 		let content: string;
 		try {
 			content = await readFile(path, "utf-8");
 		} catch (error) {
-			if ((error as NodeJS.ErrnoException).code === "ENOENT") return new ModelConfig(new Map());
+			if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+				if (requireInput) throw new Error(`Explicit models input does not exist: ${path}`);
+				return new ModelConfig(new Map());
+			}
 			return new ModelConfig(
 				new Map(),
 				`Failed to load models.json: ${error instanceof Error ? error.message : error}\n\nFile: ${path}`,

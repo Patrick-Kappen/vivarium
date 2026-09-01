@@ -150,6 +150,7 @@ export class ModelRuntime implements Models {
 	private readonly extensionProviders = new Map<string, ProviderConfigInput>();
 	private readonly compositionErrors = new Map<string, string>();
 	private readonly modelsPath: string | undefined;
+	private readonly requireModelsInput: boolean;
 	private readonly modelNetworkEnabled: boolean;
 	private config: ModelConfig;
 	private snapshot: ModelRuntimeSnapshot = {
@@ -169,6 +170,7 @@ export class ModelRuntime implements Models {
 		credentials: RuntimeCredentials,
 		config: ModelConfig,
 		modelsPath: string | undefined,
+		requireModelsInput: boolean,
 		modelsStore: ModelsStore,
 		providers: readonly Provider[],
 		modelNetworkEnabled: boolean,
@@ -176,6 +178,7 @@ export class ModelRuntime implements Models {
 		this.credentials = credentials;
 		this.config = config;
 		this.modelsPath = modelsPath;
+		this.requireModelsInput = requireModelsInput;
 		this.modelNetworkEnabled = modelNetworkEnabled;
 		this.defaultBuiltins = new Map(providers.map((provider) => [provider.id, provider]));
 		for (const [providerId, provider] of this.defaultBuiltins) this.builtins.set(providerId, provider);
@@ -187,7 +190,7 @@ export class ModelRuntime implements Models {
 		const credentials = new RuntimeCredentials(options.credentials ?? DefaultAuthStorage.create(options.authPath));
 		const modelsPath = options.modelsPath === null ? undefined : (options.modelsPath ?? getModelsPath());
 		const isManagedModelsInput = modelsPath !== undefined && modelsPath === getVivariumModelsPath();
-		const config = await ModelConfig.load(modelsPath);
+		const config = await ModelConfig.load(modelsPath, isManagedModelsInput);
 		const modelsStore =
 			options.modelsStore ??
 			(modelsPath
@@ -205,6 +208,7 @@ export class ModelRuntime implements Models {
 			credentials,
 			config,
 			modelsPath,
+			isManagedModelsInput,
 			modelsStore,
 			providers,
 			process.env.PI_OFFLINE === undefined,
@@ -702,7 +706,7 @@ export class ModelRuntime implements Models {
 	}
 
 	async refresh(options: ModelsRefreshOptions = {}): Promise<ModelsRefreshResult> {
-		this.config = await ModelConfig.load(this.modelsPath);
+		this.config = await ModelConfig.load(this.modelsPath, this.requireModelsInput);
 		this.configureRadiusProviders();
 		if (options.providers) {
 			for (const providerId of new Set(options.providers)) this.recomposeProvider(providerId);

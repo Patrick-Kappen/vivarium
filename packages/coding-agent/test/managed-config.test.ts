@@ -1,6 +1,7 @@
+import { spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { getAgentDir, getModelsPath, getSettingsPath } from "../src/config.ts";
 import { AuthStorage } from "../src/core/auth-storage.ts";
@@ -88,6 +89,28 @@ describe("managed configuration inputs", () => {
 			writeFileSync(path, JSON.stringify({ theme: "dark", defaultModel: "baseline-model" }, null, 2));
 			return path;
 		}
+
+		it("rejects a missing explicit settings input without creating it", () => {
+			const settingsPath = join(tempDir, "missing-settings", "settings.json");
+			setEnv(ENV_SETTINGS_PATH, settingsPath);
+			setEnv(ENV_MANAGED, "1");
+
+			expect(() => SettingsManager.create(cwd, agentDir)).toThrow(
+				`Explicit settings input does not exist: ${settingsPath}`,
+			);
+			expect(existsSync(settingsPath)).toBe(false);
+			expect(existsSync(dirname(settingsPath))).toBe(false);
+		});
+
+		it("allows the implicit agent-dir settings file to be absent", () => {
+			setEnv(ENV_SETTINGS_PATH, undefined);
+
+			const manager = SettingsManager.create(cwd, agentDir);
+
+			expect(manager.getGlobalSettings()).toEqual({});
+			expect(manager.drainErrors()).toEqual([]);
+			expect(existsSync(join(agentDir, "settings.json"))).toBe(false);
+		});
 
 		it("loads global settings from the managed settings path", () => {
 			const settingsPath = createManagedSettings();
@@ -242,6 +265,39 @@ describe("managed configuration inputs", () => {
 			return path;
 		}
 
+		it("rejects a missing explicit models input without creating it", async () => {
+			const modelsPath = join(tempDir, "missing-models", "models.json");
+			setEnv(ENV_MODELS_PATH, modelsPath);
+			setEnv(ENV_MANAGED, "1");
+
+			await expect(ModelRuntime.create({ refreshOnCreate: false, allowModelNetwork: false })).rejects.toThrow(
+				`Explicit models input does not exist: ${modelsPath}`,
+			);
+			expect(existsSync(modelsPath)).toBe(false);
+			expect(existsSync(dirname(modelsPath))).toBe(false);
+		});
+
+		it("allows the implicit agent-dir models file to be absent", async () => {
+			setEnv(ENV_MODELS_PATH, undefined);
+
+			const runtime = await ModelRuntime.create({ refreshOnCreate: false, allowModelNetwork: false });
+
+			expect(runtime.getError()).toBeUndefined();
+			expect(existsSync(join(agentDir, "models.json"))).toBe(false);
+		});
+
+		it("fails closed when an explicit models input disappears before refresh", async () => {
+			const modelsPath = createManagedModels();
+			setEnv(ENV_MODELS_PATH, modelsPath);
+			const runtime = await ModelRuntime.create({ refreshOnCreate: false, allowModelNetwork: false });
+			rmSync(modelsPath);
+
+			await expect(runtime.refresh({ allowNetwork: false })).rejects.toThrow(
+				`Explicit models input does not exist: ${modelsPath}`,
+			);
+			expect(existsSync(modelsPath)).toBe(false);
+		});
+
 		it("loads the model configuration from the managed models path", async () => {
 			const modelsPath = createManagedModels();
 			setEnv(ENV_MODELS_PATH, modelsPath);
@@ -309,6 +365,50 @@ describe("managed configuration inputs", () => {
 				"managed-test"?: { key?: string };
 			};
 			expect(stored["managed-test"]?.key).toBe("secret-key");
+		});
+	});
+
+	describe("managed metadata commands", () => {
+		it("reads explicit inputs without changing managed or runtime state", () => {
+			const settingsPath = join(tempDir, "metadata-settings.json");
+			const modelsPath = join(tempDir, "metadata-models.json");
+			const settingsContents = '{"theme":"dark"}\n';
+			const modelsContents = '{"providers":{}}\n';
+			writeFileSync(settingsPath, settingsContents);
+			writeFileSync(modelsPath, modelsContents);
+
+			const result = spawnSync(
+				process.execPath,
+				[
+					"--import",
+					resolve(__dirname, "../../../node_modules/tsx/dist/loader.mjs"),
+					resolve(__dirname, "../src/cli.ts"),
+					"--version",
+				],
+				{
+					cwd,
+					env: {
+						...process.env,
+						[ENV_AGENT_DIR]: agentDir,
+						[ENV_SETTINGS_PATH]: settingsPath,
+						[ENV_MODELS_PATH]: modelsPath,
+						[ENV_MANAGED]: "1",
+						PI_OFFLINE: "1",
+						TSX_TSCONFIG_PATH: resolve(__dirname, "../../../tsconfig.json"),
+					},
+					encoding: "utf8",
+				},
+			);
+
+			expect(result.status).toBe(0);
+			expect(result.stdout.trim()).toMatch(/^\d+\.\d+\.\d+/);
+			expect(result.stderr).toBe("");
+			expect(readFileSync(settingsPath, "utf8")).toBe(settingsContents);
+			expect(readFileSync(modelsPath, "utf8")).toBe(modelsContents);
+			expect(existsSync(join(agentDir, "auth.json"))).toBe(false);
+			expect(existsSync(join(agentDir, "managed-state.json"))).toBe(false);
+			expect(existsSync(`${settingsPath}.lock`)).toBe(false);
+			expect(existsSync(`${modelsPath}.lock`)).toBe(false);
 		});
 	});
 

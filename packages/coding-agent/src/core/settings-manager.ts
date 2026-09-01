@@ -151,6 +151,13 @@ interface ManagedSettingsState {
 
 const MANAGED_SETTINGS_STATE_FILE = "managed-state.json";
 
+class MissingExplicitSettingsInputError extends Error {
+	constructor(path: string) {
+		super(`Explicit settings input does not exist: ${path}`);
+		this.name = "MissingExplicitSettingsInputError";
+	}
+}
+
 function isMergeableObject(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -222,13 +229,21 @@ export class FileSettingsStorage implements SettingsStorage {
 	private globalSettingsPath: string;
 	private projectSettingsPath: string;
 	private readOnlyGlobal: boolean;
+	private requireGlobal: boolean;
 
-	constructor(cwd: string, agentDir: string, globalSettingsPath?: string, readOnlyGlobal = false) {
+	constructor(
+		cwd: string,
+		agentDir: string,
+		globalSettingsPath?: string,
+		readOnlyGlobal = false,
+		requireGlobal = false,
+	) {
 		const resolvedCwd = resolvePath(cwd);
 		const resolvedAgentDir = resolvePath(agentDir);
 		this.globalSettingsPath = globalSettingsPath ?? join(resolvedAgentDir, "settings.json");
 		this.projectSettingsPath = join(resolvedCwd, CONFIG_DIR_NAME, "settings.json");
 		this.readOnlyGlobal = readOnlyGlobal;
+		this.requireGlobal = requireGlobal;
 	}
 
 	private acquireLockSyncWithRetry(path: string): () => void {
@@ -262,8 +277,20 @@ export class FileSettingsStorage implements SettingsStorage {
 		const path = scope === "global" ? this.globalSettingsPath : this.projectSettingsPath;
 		const dir = dirname(path);
 
+		if (scope === "global" && this.requireGlobal && !existsSync(path)) {
+			throw new MissingExplicitSettingsInputError(path);
+		}
+
 		if (scope === "global" && this.readOnlyGlobal) {
-			const current = existsSync(path) ? readFileSync(path, "utf-8") : undefined;
+			let current: string | undefined;
+			try {
+				current = existsSync(path) ? readFileSync(path, "utf-8") : undefined;
+			} catch (error) {
+				if (this.requireGlobal && (error as NodeJS.ErrnoException).code === "ENOENT") {
+					throw new MissingExplicitSettingsInputError(path);
+				}
+				throw error;
+			}
 			if (fn(current) !== undefined) {
 				throw new Error(
 					`Cannot persist settings: ${this.globalSettingsPath} is a read-only managed configuration input (VIVARIUM_MANAGED=1)`,
@@ -291,6 +318,11 @@ export class FileSettingsStorage implements SettingsStorage {
 				}
 				writeFileSync(path, next, "utf-8");
 			}
+		} catch (error) {
+			if (scope === "global" && this.requireGlobal && (error as NodeJS.ErrnoException).code === "ENOENT") {
+				throw new MissingExplicitSettingsInputError(path);
+			}
+			throw error;
 		} finally {
 			if (release) {
 				release();
@@ -376,8 +408,15 @@ export class SettingsManager {
 		const vivariumSettingsPath = getVivariumSettingsPath();
 		const globalSettingsPath =
 			options.settingsPath ?? vivariumSettingsPath ?? join(resolvedAgentDir, "settings.json");
+		const usesExplicitVivariumInput = options.settingsPath === undefined && vivariumSettingsPath !== undefined;
 		const readOnlyGlobal = isVivariumManaged() && vivariumSettingsPath !== undefined;
-		const storage = new FileSettingsStorage(resolvedCwd, resolvedAgentDir, globalSettingsPath, readOnlyGlobal);
+		const storage = new FileSettingsStorage(
+			resolvedCwd,
+			resolvedAgentDir,
+			globalSettingsPath,
+			readOnlyGlobal,
+			usesExplicitVivariumInput,
+		);
 		const managedStatePath = readOnlyGlobal ? join(resolvedAgentDir, MANAGED_SETTINGS_STATE_FILE) : undefined;
 		const managedStateStorage = managedStatePath
 			? new FileSettingsStorage(resolvedCwd, resolvedAgentDir, managedStatePath)
@@ -474,6 +513,7 @@ export class SettingsManager {
 		try {
 			return { settings: SettingsManager.loadFromStorage(storage, scope, projectTrusted), error: null };
 		} catch (error) {
+			if (error instanceof MissingExplicitSettingsInputError) throw error;
 			return { settings: {}, error: error as Error };
 		}
 	}
