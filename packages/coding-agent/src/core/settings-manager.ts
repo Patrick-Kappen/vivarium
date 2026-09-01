@@ -256,6 +256,16 @@ export class FileSettingsStorage implements SettingsStorage {
 		const path = scope === "global" ? this.globalSettingsPath : this.projectSettingsPath;
 		const dir = dirname(path);
 
+		if (scope === "global" && this.readOnlyGlobal) {
+			const current = existsSync(path) ? readFileSync(path, "utf-8") : undefined;
+			if (fn(current) !== undefined) {
+				throw new Error(
+					`Cannot persist settings: ${this.globalSettingsPath} is a read-only managed configuration input (VIVARIUM_MANAGED=1)`,
+				);
+			}
+			return;
+		}
+
 		let release: (() => void) | undefined;
 		try {
 			// Only create directory and lock if file exists or we need to write
@@ -266,11 +276,6 @@ export class FileSettingsStorage implements SettingsStorage {
 			const current = fileExists ? readFileSync(path, "utf-8") : undefined;
 			const next = fn(current);
 			if (next !== undefined) {
-				if (scope === "global" && this.readOnlyGlobal) {
-					throw new Error(
-						`Cannot persist settings: ${this.globalSettingsPath} is a read-only managed configuration input (VIVARIUM_MANAGED=1)`,
-					);
-				}
 				// Only create directory when we actually need to write
 				if (!existsSync(dir)) {
 					mkdirSync(dir, { recursive: true });

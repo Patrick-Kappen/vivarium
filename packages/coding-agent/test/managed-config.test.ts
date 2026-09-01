@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -97,6 +97,25 @@ describe("managed configuration inputs", () => {
 
 			expect(manager.getGlobalSettings().theme).toBe("dark");
 			expect(manager.getDefaultModel()).toBe("baseline-model");
+		});
+
+		it("loads managed settings without creating a lock beside a read-only input", () => {
+			const managedDir = join(tempDir, "read-only-store");
+			mkdirSync(managedDir);
+			const settingsPath = join(managedDir, "settings.json");
+			writeFileSync(settingsPath, JSON.stringify({ theme: "dark" }));
+			setEnv(ENV_SETTINGS_PATH, settingsPath);
+			setEnv(ENV_MANAGED, "1");
+			chmodSync(managedDir, 0o555);
+
+			try {
+				const manager = SettingsManager.create(cwd, agentDir);
+				expect(manager.getGlobalSettings().theme).toBe("dark");
+				expect(manager.drainErrors()).toEqual([]);
+				expect(existsSync(`${settingsPath}.lock`)).toBe(false);
+			} finally {
+				chmodSync(managedDir, 0o755);
+			}
 		});
 
 		it("refuses to persist saved model and thinking defaults into managed settings", async () => {
