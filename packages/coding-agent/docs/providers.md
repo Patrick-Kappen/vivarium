@@ -138,6 +138,28 @@ credential under the provider you select; an environment variable is shared by b
 
 The file is created with `0600` permissions (user read/write only). Auth file credentials take priority over environment variables.
 
+### Inspecting the Active Credential Source
+
+Use a read-only JSON auth check to see which credential category is active
+without printing the credential:
+
+```bash
+pi auth check --provider openai --no-refresh --json
+```
+
+A ready provider includes a `source` field:
+
+```json
+{"status":"ready","provider":"openai","authType":"api_key","source":"stored"}
+```
+
+Common values are `stored` and `environment`; configured or runtime provider
+credentials may report another source category. Stored credentials take
+precedence, so removing one changes the source back to `environment` when the
+provider's environment variable is available. Plain output remains `ready` for
+script compatibility. `--no-refresh` prevents OAuth refresh, and the credential
+is omitted unless `--credentials` is explicitly requested.
+
 In managed Vivarium mode, legacy `oauth.json` and `settings.json.apiKeys` are
 never imported silently. The first interactive session asks whether to import,
 start empty, or cancel when `auth.json` is absent. Non-interactive sessions

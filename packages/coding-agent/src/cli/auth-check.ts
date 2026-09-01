@@ -2,6 +2,7 @@ import type { CredentialStore } from "@earendil-works/pi-ai";
 import { resolveCliModel } from "../core/model-resolver.ts";
 import { ModelRuntime } from "../core/model-runtime.ts";
 import { InMemoryCodingAgentModelsStore } from "../core/models-store.ts";
+import type { AuthStatus } from "../core/provider-composer.ts";
 import type { Args } from "./args.ts";
 import { AuthCommandError, getAuthCredential, validateAuthCommandArgs } from "./auth-command.ts";
 
@@ -17,6 +18,7 @@ export interface AuthCheckResult {
 	provider: string;
 	reason?: AuthCheckReason;
 	authType?: "api_key" | "oauth";
+	source?: AuthStatus["source"];
 }
 
 export async function checkProviderAuth(
@@ -41,12 +43,14 @@ export async function checkProviderAuth(
 		return { status: "not_ready", provider, reason: "provider_not_found" };
 	}
 	try {
+		await modelRuntime.refresh({ allowNetwork: false, providers: [provider] });
 		const auth = await modelRuntime.checkAuth(provider);
 		if (!auth) return { status: "not_ready", provider, reason: "credentials_not_configured" };
 		if (options.refresh && !(await modelRuntime.getAuth(provider))) {
 			return { status: "not_ready", provider, reason: "credentials_not_configured" };
 		}
-		return { status: "ready", provider, authType: auth.type };
+		const source = modelRuntime.getProviderAuthStatus(provider).source;
+		return { status: "ready", provider, authType: auth.type, ...(source ? { source } : {}) };
 	} catch {
 		return { status: "invalid", provider, reason: "invalid_state" };
 	}
