@@ -1,7 +1,7 @@
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { basename, dirname, join, resolve, sep } from "node:path";
 import chalk from "chalk";
-import { CONFIG_DIR_NAME } from "../config.ts";
+import { CONFIG_DIR_NAME, isVivariumManaged } from "../config.ts";
 import { loadThemeFromPath, type Theme } from "../modes/interactive/theme/theme.ts";
 import type { ResourceDiagnostic } from "./diagnostics.ts";
 
@@ -1026,9 +1026,13 @@ export class DefaultResourceLoader implements ResourceLoader {
 			return projectPath;
 		}
 
-		const globalPath = join(this.agentDir, "SYSTEM.md");
-		if (existsSync(globalPath)) {
-			return globalPath;
+		// In managed mode the writable agent directory must not contribute a
+		// global SYSTEM.md; only project and explicit overrides are honored.
+		if (!isVivariumManaged()) {
+			const globalPath = join(this.agentDir, "SYSTEM.md");
+			if (existsSync(globalPath)) {
+				return globalPath;
+			}
 		}
 
 		return undefined;
@@ -1040,9 +1044,13 @@ export class DefaultResourceLoader implements ResourceLoader {
 			return projectPath;
 		}
 
-		const globalPath = join(this.agentDir, "APPEND_SYSTEM.md");
-		if (existsSync(globalPath)) {
-			return globalPath;
+		// In managed mode the writable agent directory must not contribute a
+		// global APPEND_SYSTEM.md; only project and explicit overrides are honored.
+		if (!isVivariumManaged()) {
+			const globalPath = join(this.agentDir, "APPEND_SYSTEM.md");
+			if (existsSync(globalPath)) {
+				return globalPath;
+			}
 		}
 
 		return undefined;

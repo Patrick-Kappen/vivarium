@@ -9,6 +9,10 @@ Pi uses JSON settings files with project settings overriding global settings.
 
 Edit directly or use `/settings` for common options. To save startup model defaults interactively, use `/model` and press Ctrl+S on the desired model. To save the startup thinking level, use `/thinking` and press Ctrl+S.
 
+## Managed Settings Input
+
+Vivarium deployments can point Pi at an explicit, read-only `settings.json` input with the `VIVARIUM_SETTINGS_PATH` environment variable, independent of `PI_CODING_AGENT_DIR`. Setting `VIVARIUM_MANAGED=1` makes that input read-only: `/settings` changes, saved model defaults (`/model` + Ctrl+S), and saved thinking defaults (`/thinking` + Ctrl+S) apply for the current session but are not written back into the managed file, and Pi records a settings error instead. Project `.pi/settings.json` files remain writable. See [Environment variables: Managed configuration inputs](environment-variables.md#managed-configuration-inputs).
+
 ## Project Trust
 
 On interactive startup, pi asks before trusting a project folder that contains project-local settings, resources, or project `.agents/skills` and has no saved decision for the folder or a parent folder in `~/.pi/agent/trust.json`. Trusting a project allows pi to load `.pi/settings.json` and `.pi` resources, install missing project packages, and execute project extensions.

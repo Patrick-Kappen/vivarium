@@ -2,6 +2,8 @@
 
 Add custom providers and models (Ollama, vLLM, LM Studio, proxies) via `~/.pi/agent/models.json`.
 
+Vivarium deployments can load this configuration from an explicit read-only input with the `VIVARIUM_MODELS_PATH` environment variable, independent of `PI_CODING_AGENT_DIR`; setting `VIVARIUM_MANAGED=1` keeps that input read-only while `models-store.json` and auth state stay in the writable agent directory. See [Environment variables: Managed configuration inputs](environment-variables.md#managed-configuration-inputs).
+
 ## Table of Contents
 
 - [Minimal Example](#minimal-example)

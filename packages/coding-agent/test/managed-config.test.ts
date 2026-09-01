@@ -1,0 +1,283 @@
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { getAgentDir, getModelsPath, getSettingsPath } from "../src/config.ts";
+import { AuthStorage } from "../src/core/auth-storage.ts";
+import { ModelRuntime, resolveModelsStorePath } from "../src/core/model-runtime.ts";
+import * as modelsStoreModule from "../src/core/models-store.ts";
+import { DefaultResourceLoader } from "../src/core/resource-loader.ts";
+import { SettingsManager } from "../src/core/settings-manager.ts";
+
+// =============================================================================
+// Managed configuration inputs (Vivarium)
+// =============================================================================
+// Covers the VIVARIUM_MANAGED / VIVARIUM_SETTINGS_PATH / VIVARIUM_MODELS_PATH
+// contract: explicit read-only settings.json and models.json inputs, with the
+// agent directory remaining the writable location for runtime state.
+
+const ENV_MANAGED = "VIVARIUM_MANAGED";
+const ENV_SETTINGS_PATH = "VIVARIUM_SETTINGS_PATH";
+const ENV_MODELS_PATH = "VIVARIUM_MODELS_PATH";
+const ENV_AGENT_DIR = "PI_CODING_AGENT_DIR";
+
+const originalEnv: Record<string, string | undefined> = {
+	[ENV_MANAGED]: process.env[ENV_MANAGED],
+	[ENV_SETTINGS_PATH]: process.env[ENV_SETTINGS_PATH],
+	[ENV_MODELS_PATH]: process.env[ENV_MODELS_PATH],
+	[ENV_AGENT_DIR]: process.env[ENV_AGENT_DIR],
+};
+
+function setEnv(name: string, value: string | undefined): void {
+	if (value === undefined) {
+		delete process.env[name];
+	} else {
+		process.env[name] = value;
+	}
+}
+
+function restoreEnv(): void {
+	for (const [name, value] of Object.entries(originalEnv)) {
+		setEnv(name, value);
+	}
+}
+
+describe("managed configuration inputs", () => {
+	let tempDir: string;
+	let agentDir: string;
+	let cwd: string;
+
+	beforeEach(() => {
+		tempDir = mkdtempSync(join(tmpdir(), "managed-config-"));
+		agentDir = join(tempDir, "agent");
+		cwd = join(tempDir, "project");
+		mkdirSync(agentDir, { recursive: true });
+		mkdirSync(cwd, { recursive: true });
+		setEnv(ENV_AGENT_DIR, agentDir);
+	});
+
+	afterEach(() => {
+		restoreEnv();
+		rmSync(tempDir, { recursive: true, force: true });
+	});
+
+	describe("config path selection", () => {
+		it("selects explicit settings.json and models.json inputs independently of the agent dir", () => {
+			const settingsPath = join(tempDir, "managed-settings.json");
+			const modelsPath = join(tempDir, "managed-models.json");
+			setEnv(ENV_SETTINGS_PATH, settingsPath);
+			setEnv(ENV_MODELS_PATH, modelsPath);
+
+			expect(getSettingsPath()).toBe(settingsPath);
+			expect(getModelsPath()).toBe(modelsPath);
+			expect(getSettingsPath()).not.toBe(join(getAgentDir(), "settings.json"));
+		});
+
+		it("falls back to the agent dir when the Vivarium variables are absent", () => {
+			setEnv(ENV_SETTINGS_PATH, undefined);
+			setEnv(ENV_MODELS_PATH, undefined);
+
+			expect(getSettingsPath()).toBe(join(agentDir, "settings.json"));
+			expect(getModelsPath()).toBe(join(agentDir, "models.json"));
+		});
+	});
+
+	describe("managed settings input", () => {
+		function createManagedSettings(): string {
+			const path = join(tempDir, "managed-settings.json");
+			writeFileSync(path, JSON.stringify({ theme: "dark", defaultModel: "baseline-model" }, null, 2));
+			return path;
+		}
+
+		it("loads global settings from the managed settings path", () => {
+			const settingsPath = createManagedSettings();
+			setEnv(ENV_SETTINGS_PATH, settingsPath);
+
+			const manager = SettingsManager.create(cwd, agentDir);
+
+			expect(manager.getGlobalSettings().theme).toBe("dark");
+			expect(manager.getDefaultModel()).toBe("baseline-model");
+		});
+
+		it("refuses to persist saved model and thinking defaults into managed settings", async () => {
+			const settingsPath = createManagedSettings();
+			setEnv(ENV_SETTINGS_PATH, settingsPath);
+			setEnv(ENV_MANAGED, "1");
+
+			const manager = SettingsManager.create(cwd, agentDir);
+			manager.setDefaultModel("session-model");
+			manager.setDefaultThinkingLevel("high");
+			await manager.flush();
+
+			// In-memory session state still reflects the selection.
+			expect(manager.getDefaultModel()).toBe("session-model");
+			expect(manager.getDefaultThinkingLevel()).toBe("high");
+
+			// The managed input file is untouched.
+			const persisted = JSON.parse(readFileSync(settingsPath, "utf-8")) as {
+				theme?: string;
+				defaultModel?: string;
+				defaultThinkingLevel?: string;
+			};
+			expect(persisted.theme).toBe("dark");
+			expect(persisted.defaultModel).toBe("baseline-model");
+			expect(persisted.defaultThinkingLevel).toBeUndefined();
+
+			// No settings.json was created in the writable agent directory either.
+			expect(existsSync(join(agentDir, "settings.json"))).toBe(false);
+
+			// The refusal is reported as a settings error with the managed path.
+			const errors = manager.drainErrors();
+			expect(errors.length).toBeGreaterThan(0);
+			for (const error of errors) {
+				expect(error.scope).toBe("global");
+				expect(error.path).toBe(settingsPath);
+				expect(error.error.message).toContain("read-only managed configuration input");
+			}
+		});
+
+		it("keeps the managed settings input writable when VIVARIUM_MANAGED is not set", async () => {
+			const settingsPath = createManagedSettings();
+			setEnv(ENV_SETTINGS_PATH, settingsPath);
+			setEnv(ENV_MANAGED, undefined);
+
+			const manager = SettingsManager.create(cwd, agentDir);
+			manager.setDefaultModel("selected-model");
+			await manager.flush();
+
+			const persisted = JSON.parse(readFileSync(settingsPath, "utf-8")) as { defaultModel?: string };
+			expect(persisted.defaultModel).toBe("selected-model");
+			expect(manager.drainErrors()).toEqual([]);
+		});
+	});
+
+	describe("managed models input", () => {
+		function createManagedModels(): string {
+			const path = join(tempDir, "managed-models.json");
+			writeFileSync(
+				path,
+				JSON.stringify({
+					providers: {
+						"managed-test": {
+							baseUrl: "http://localhost:9999/v1",
+							api: "openai-completions",
+							apiKey: "managed-placeholder",
+							models: [{ id: "managed-model" }],
+						},
+					},
+				}),
+			);
+			return path;
+		}
+
+		it("loads the model configuration from the managed models path", async () => {
+			const modelsPath = createManagedModels();
+			setEnv(ENV_MODELS_PATH, modelsPath);
+
+			const runtime = await ModelRuntime.create({ refreshOnCreate: false, allowModelNetwork: false });
+
+			expect(runtime.getModel("managed-test", "managed-model")?.id).toBe("managed-model");
+			expect(runtime.getError()).toBeUndefined();
+		});
+
+		it("keeps the models-store cache in the writable agent dir, not next to the managed input", async () => {
+			const modelsPath = createManagedModels();
+			setEnv(ENV_MODELS_PATH, modelsPath);
+
+			expect(resolveModelsStorePath(modelsPath, true)).toBe(join(agentDir, "models-store.json"));
+			expect(resolveModelsStorePath(modelsPath, false)).toBe(join(dirname(modelsPath), "models-store.json"));
+
+			const storeSpy = vi.spyOn(modelsStoreModule, "FileModelsStore");
+			let constructedPaths: string[];
+			try {
+				await ModelRuntime.create({ refreshOnCreate: false, allowModelNetwork: false });
+				constructedPaths = storeSpy.mock.calls.map((args) => args[0]).filter((p): p is string => p !== undefined);
+			} finally {
+				storeSpy.mockRestore();
+			}
+
+			expect(constructedPaths.length).toBeGreaterThan(0);
+			expect(constructedPaths).toContain(join(agentDir, "models-store.json"));
+			expect(constructedPaths).not.toContain(join(dirname(modelsPath), "models-store.json"));
+		});
+
+		it("keeps the cache in the agent dir even when callers pass the env-selected models path explicitly", async () => {
+			const modelsPath = createManagedModels();
+			setEnv(ENV_MODELS_PATH, modelsPath);
+
+			// agent-session-services and the SDK resolve the env path and pass it
+			// as an explicit modelsPath; the managed flag follows the effective path.
+			const storeSpy = vi.spyOn(modelsStoreModule, "FileModelsStore");
+			let constructedPaths: string[];
+			try {
+				await ModelRuntime.create({ modelsPath, refreshOnCreate: false, allowModelNetwork: false });
+				constructedPaths = storeSpy.mock.calls.map((args) => args[0]).filter((p): p is string => p !== undefined);
+			} finally {
+				storeSpy.mockRestore();
+			}
+
+			expect(constructedPaths.length).toBeGreaterThan(0);
+			expect(constructedPaths).toContain(join(agentDir, "models-store.json"));
+			expect(constructedPaths).not.toContain(join(dirname(modelsPath), "models-store.json"));
+		});
+
+		it("keeps auth.json writable in the agent dir for runtime credentials", async () => {
+			setEnv(ENV_MANAGED, "1");
+			setEnv(ENV_MODELS_PATH, createManagedModels());
+
+			const auth = AuthStorage.create(join(agentDir, "auth.json"));
+			await auth.modify("managed-test", async () => ({
+				providerId: "managed-test",
+				type: "api_key",
+				key: "secret-key",
+			}));
+
+			expect(existsSync(join(agentDir, "auth.json"))).toBe(true);
+			const stored = JSON.parse(readFileSync(join(agentDir, "auth.json"), "utf-8")) as {
+				"managed-test"?: { key?: string };
+			};
+			expect(stored["managed-test"]?.key).toBe("secret-key");
+		});
+	});
+
+	describe("managed-mode system prompt discovery", () => {
+		it("does not discover global SYSTEM.md or APPEND_SYSTEM.md from the agent dir", async () => {
+			writeFileSync(join(agentDir, "SYSTEM.md"), "Global system prompt.");
+			writeFileSync(join(agentDir, "APPEND_SYSTEM.md"), "Global append instructions.");
+			setEnv(ENV_MANAGED, "1");
+
+			const loader = new DefaultResourceLoader({ cwd, agentDir });
+			await loader.reload();
+
+			expect(loader.getSystemPrompt()).toBeUndefined();
+			expect(loader.getSystemPromptSource()).toBeUndefined();
+			expect(loader.getAppendSystemPrompt()).toEqual([]);
+			expect(loader.getAppendSystemPromptSources()).toEqual([]);
+		});
+
+		it("still discovers a trusted project SYSTEM.md in managed mode", async () => {
+			const piDir = join(cwd, ".pi");
+			mkdirSync(piDir, { recursive: true });
+			writeFileSync(join(piDir, "SYSTEM.md"), "Project system prompt.");
+			writeFileSync(join(agentDir, "SYSTEM.md"), "Global system prompt.");
+			setEnv(ENV_MANAGED, "1");
+
+			const loader = new DefaultResourceLoader({ cwd, agentDir });
+			await loader.reload();
+
+			expect(loader.getSystemPrompt()).toBe("Project system prompt.");
+			expect(loader.getSystemPromptSource()).toEqual({ path: join(piDir, "SYSTEM.md") });
+		});
+
+		it("discovers agent-dir SYSTEM.md when Vivarium variables are absent", async () => {
+			writeFileSync(join(agentDir, "SYSTEM.md"), "Global system prompt.");
+			setEnv(ENV_MANAGED, undefined);
+
+			const loader = new DefaultResourceLoader({ cwd, agentDir });
+			await loader.reload();
+
+			expect(loader.getSystemPrompt()).toBe("Global system prompt.");
+			expect(loader.getSystemPromptSource()).toEqual({ path: join(agentDir, "SYSTEM.md") });
+		});
+	});
+});
