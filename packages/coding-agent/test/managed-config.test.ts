@@ -118,6 +118,59 @@ describe("managed configuration inputs", () => {
 			}
 		});
 
+		it("persists changelog bookkeeping beside runtime state without changing managed settings", async () => {
+			const settingsPath = createManagedSettings();
+			writeFileSync(
+				settingsPath,
+				JSON.stringify({ theme: "dark", defaultModel: "baseline-model", lastChangelogVersion: "0.84.3" }, null, 2),
+			);
+			const managedInputBefore = readFileSync(settingsPath, "utf-8");
+			const statePath = join(agentDir, "managed-state.json");
+			setEnv(ENV_SETTINGS_PATH, settingsPath);
+			setEnv(ENV_MANAGED, "1");
+
+			const manager = SettingsManager.create(cwd, agentDir);
+			expect(manager.getLastChangelogVersion()).toBe("0.84.3");
+			expect(existsSync(statePath)).toBe(false);
+
+			manager.setLastChangelogVersion("0.84.4");
+			await manager.flush();
+
+			expect(readFileSync(settingsPath, "utf-8")).toBe(managedInputBefore);
+			expect(JSON.parse(readFileSync(statePath, "utf-8"))).toEqual({ lastChangelogVersion: "0.84.4" });
+			expect(existsSync(`${settingsPath}.lock`)).toBe(false);
+			expect(existsSync(`${statePath}.lock`)).toBe(false);
+			expect(manager.drainErrors()).toEqual([]);
+
+			const reloaded = SettingsManager.create(cwd, agentDir);
+			expect(reloaded.getLastChangelogVersion()).toBe("0.84.4");
+			expect(reloaded.getDefaultModel()).toBe("baseline-model");
+			expect(reloaded.drainErrors()).toEqual([]);
+		});
+
+		it.each([
+			["malformed JSON", '{"lastChangelogVersion":'],
+			["an operator setting field", '{"defaultModel":"injected-model"}'],
+		])("preserves managed bookkeeping state containing %s", async (_case, invalidState) => {
+			const settingsPath = createManagedSettings();
+			const statePath = join(agentDir, "managed-state.json");
+			writeFileSync(statePath, invalidState);
+			setEnv(ENV_SETTINGS_PATH, settingsPath);
+			setEnv(ENV_MANAGED, "1");
+
+			const manager = SettingsManager.create(cwd, agentDir);
+			expect(manager.getLastChangelogVersion()).toBeUndefined();
+			expect(manager.getDefaultModel()).toBe("baseline-model");
+			const errors = manager.drainErrors();
+			expect(errors).toHaveLength(1);
+			expect(errors[0]?.path).toBe(statePath);
+
+			manager.setLastChangelogVersion("0.84.4");
+			await manager.flush();
+
+			expect(readFileSync(statePath, "utf-8")).toBe(invalidState);
+		});
+
 		it("refuses to persist saved model and thinking defaults into managed settings", async () => {
 			const settingsPath = createManagedSettings();
 			setEnv(ENV_SETTINGS_PATH, settingsPath);
