@@ -145,6 +145,12 @@ export interface Settings {
 	fullscreenCopyOnSelect?: boolean; // default: true; no effect in regular TUI mode
 }
 
+interface ManagedSettingsState {
+	lastChangelogVersion?: string;
+}
+
+const MANAGED_SETTINGS_STATE_FILE = "managed-state.json";
+
 function isMergeableObject(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -316,6 +322,10 @@ export class SettingsManager {
 	private projectSettings: Settings;
 	private settings: Settings;
 	private projectTrusted: boolean;
+	private managedStateStorage: SettingsStorage | null;
+	private managedState: ManagedSettingsState;
+	private managedStateLoadError: Error | null;
+	private managedStatePath: string | undefined;
 	private modifiedFields = new Set<keyof Settings>(); // Track global fields modified during session
 	private modifiedNestedFields = new Map<keyof Settings, Set<string>>(); // Track global nested field modifications
 	private modifiedProjectFields = new Set<keyof Settings>(); // Track project fields modified during session
@@ -335,11 +345,19 @@ export class SettingsManager {
 		initialErrors: SettingsError[] = [],
 		projectTrusted = true,
 		settingsPaths: SettingsPaths = {},
+		managedStateStorage: SettingsStorage | null = null,
+		managedState: ManagedSettingsState = {},
+		managedStateLoadError: Error | null = null,
+		managedStatePath?: string,
 	) {
 		this.storage = storage;
 		this.globalSettings = initialGlobal;
 		this.projectSettings = initialProject;
 		this.projectTrusted = projectTrusted;
+		this.managedStateStorage = managedStateStorage;
+		this.managedState = managedState;
+		this.managedStateLoadError = managedStateLoadError;
+		this.managedStatePath = managedStatePath;
 		this.globalSettingsLoadError = globalLoadError;
 		this.projectSettingsLoadError = projectLoadError;
 		this.errors = [...initialErrors];
@@ -360,10 +378,20 @@ export class SettingsManager {
 			options.settingsPath ?? vivariumSettingsPath ?? join(resolvedAgentDir, "settings.json");
 		const readOnlyGlobal = isVivariumManaged() && vivariumSettingsPath !== undefined;
 		const storage = new FileSettingsStorage(resolvedCwd, resolvedAgentDir, globalSettingsPath, readOnlyGlobal);
-		return SettingsManager.fromStorageWithPaths(storage, options, {
-			global: globalSettingsPath,
-			project: join(resolvedCwd, CONFIG_DIR_NAME, "settings.json"),
-		});
+		const managedStatePath = readOnlyGlobal ? join(resolvedAgentDir, MANAGED_SETTINGS_STATE_FILE) : undefined;
+		const managedStateStorage = managedStatePath
+			? new FileSettingsStorage(resolvedCwd, resolvedAgentDir, managedStatePath)
+			: null;
+		return SettingsManager.fromStorageWithPaths(
+			storage,
+			options,
+			{
+				global: globalSettingsPath,
+				project: join(resolvedCwd, CONFIG_DIR_NAME, "settings.json"),
+			},
+			managedStateStorage,
+			managedStatePath,
+		);
 	}
 
 	/** Create a SettingsManager from an arbitrary storage backend */
@@ -376,16 +404,24 @@ export class SettingsManager {
 		storage: SettingsStorage,
 		options: SettingsManagerCreateOptions,
 		settingsPaths: SettingsPaths = {},
+		managedStateStorage: SettingsStorage | null = null,
+		managedStatePath?: string,
 	): SettingsManager {
 		const projectTrusted = options.projectTrusted ?? true;
 		const globalLoad = SettingsManager.tryLoadFromStorage(storage, "global");
 		const projectLoad = SettingsManager.tryLoadFromStorage(storage, "project", projectTrusted);
+		const managedStateLoad = managedStateStorage
+			? SettingsManager.tryLoadManagedState(managedStateStorage)
+			: { state: {}, error: null };
 		const initialErrors: SettingsError[] = [];
 		if (globalLoad.error) {
 			initialErrors.push(toSettingsError("global", globalLoad.error, settingsPaths.global));
 		}
 		if (projectLoad.error) {
 			initialErrors.push(toSettingsError("project", projectLoad.error, settingsPaths.project));
+		}
+		if (managedStateLoad.error) {
+			initialErrors.push(toSettingsError("global", managedStateLoad.error, managedStatePath));
 		}
 
 		return new SettingsManager(
@@ -397,6 +433,10 @@ export class SettingsManager {
 			initialErrors,
 			projectTrusted,
 			settingsPaths,
+			managedStateStorage,
+			managedStateLoad.state,
+			managedStateLoad.error,
+			managedStatePath,
 		);
 	}
 
@@ -435,6 +475,43 @@ export class SettingsManager {
 			return { settings: SettingsManager.loadFromStorage(storage, scope, projectTrusted), error: null };
 		} catch (error) {
 			return { settings: {}, error: error as Error };
+		}
+	}
+
+	private static parseManagedState(content: string | undefined): ManagedSettingsState {
+		if (!content) {
+			return {};
+		}
+
+		const parsed: unknown = JSON.parse(stripBom(content));
+		if (!isMergeableObject(parsed)) {
+			throw new Error("Invalid managed settings state: expected a JSON object");
+		}
+		for (const key of Object.keys(parsed)) {
+			if (key !== "lastChangelogVersion") {
+				throw new Error(`Invalid managed settings state field: ${key}`);
+			}
+		}
+		if (parsed.lastChangelogVersion !== undefined && typeof parsed.lastChangelogVersion !== "string") {
+			throw new Error("Invalid managed settings state: lastChangelogVersion must be a string");
+		}
+		return parsed as ManagedSettingsState;
+	}
+
+	private static loadManagedState(storage: SettingsStorage): ManagedSettingsState {
+		let content: string | undefined;
+		storage.withLock("global", (current) => {
+			content = current;
+			return undefined;
+		});
+		return SettingsManager.parseManagedState(content);
+	}
+
+	private static tryLoadManagedState(storage: SettingsStorage): { state: ManagedSettingsState; error: Error | null } {
+		try {
+			return { state: SettingsManager.loadManagedState(storage), error: null };
+		} catch (error) {
+			return { state: {}, error: error as Error };
 		}
 	}
 
@@ -562,6 +639,17 @@ export class SettingsManager {
 			this.recordError("project", projectLoad.error);
 		}
 
+		if (this.managedStateStorage) {
+			const managedStateLoad = SettingsManager.tryLoadManagedState(this.managedStateStorage);
+			if (!managedStateLoad.error) {
+				this.managedState = managedStateLoad.state;
+				this.managedStateLoadError = null;
+			} else {
+				this.managedStateLoadError = managedStateLoad.error;
+				this.errors.push(toSettingsError("global", managedStateLoad.error, this.managedStatePath));
+			}
+		}
+
 		this.settings = deepMergeSettings(this.globalSettings, this.projectSettings);
 	}
 
@@ -682,6 +770,25 @@ export class SettingsManager {
 		});
 	}
 
+	private saveManagedState(): void {
+		const storage = this.managedStateStorage;
+		if (!storage || this.managedStateLoadError) {
+			return;
+		}
+
+		const snapshot = structuredClone(this.managedState);
+		this.writeQueue = this.writeQueue
+			.then(() => {
+				storage.withLock("global", (current) => {
+					SettingsManager.parseManagedState(current);
+					return JSON.stringify(snapshot, null, 2);
+				});
+			})
+			.catch((error) => {
+				this.errors.push(toSettingsError("global", error, this.managedStatePath));
+			});
+	}
+
 	private saveProjectSettings(settings: Settings): void {
 		this.assertProjectTrustedForWrite();
 		this.projectSettings = structuredClone(settings);
@@ -718,10 +825,15 @@ export class SettingsManager {
 	}
 
 	getLastChangelogVersion(): string | undefined {
-		return this.settings.lastChangelogVersion;
+		return this.managedState.lastChangelogVersion ?? this.settings.lastChangelogVersion;
 	}
 
 	setLastChangelogVersion(version: string): void {
+		if (this.managedStateStorage) {
+			this.managedState.lastChangelogVersion = version;
+			this.saveManagedState();
+			return;
+		}
 		this.globalSettings.lastChangelogVersion = version;
 		this.markModified("lastChangelogVersion");
 		this.save();
