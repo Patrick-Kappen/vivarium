@@ -175,6 +175,31 @@ describe("auth check command", () => {
 		expect(refresh).toHaveBeenCalledOnce();
 	});
 
+	test("reports provider refresh errors as invalid", async () => {
+		const runtime = await createRuntime(AuthStorage.inMemory({ openai: { type: "api_key", key: "test-key" } }));
+		vi.spyOn(runtime, "refresh").mockResolvedValue({
+			aborted: false,
+			errors: new Map([["openai", new Error("synthetic refresh failure")]]),
+		});
+
+		await expect(checkProviderAuth(parseArgs(["--provider", "openai"]), runtime)).resolves.toEqual({
+			status: "invalid",
+			provider: "openai",
+			reason: "invalid_state",
+		});
+	});
+
+	test("reports runtime errors introduced during refresh as invalid", async () => {
+		const runtime = await createRuntime(AuthStorage.inMemory({ openai: { type: "api_key", key: "test-key" } }));
+		vi.spyOn(runtime, "getError").mockReturnValueOnce(undefined).mockReturnValue("synthetic runtime failure");
+
+		await expect(checkProviderAuth(parseArgs(["--provider", "openai"]), runtime)).resolves.toEqual({
+			status: "invalid",
+			provider: "openai",
+			reason: "invalid_state",
+		});
+	});
+
 	test("reports an unknown provider as not ready", async () => {
 		const runtime = await createRuntime(AuthStorage.inMemory());
 
