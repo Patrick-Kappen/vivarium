@@ -14,6 +14,34 @@ const MIGRATION_GUIDE_URL =
 const EXTENSIONS_DOC_URL =
 	"https://github.com/earendil-works/pi-mono/blob/main/packages/coding-agent/docs/extensions.md";
 
+export type AuthMigrationState = "initialized" | "legacy" | "none";
+
+export function getAuthMigrationState(): AuthMigrationState {
+	const agentDir = getAgentDir();
+	if (existsSync(join(agentDir, "auth.json"))) return "initialized";
+	if (existsSync(join(agentDir, "oauth.json"))) return "legacy";
+
+	try {
+		const settings = JSON.parse(stripBom(readFileSync(join(agentDir, "settings.json"), "utf-8"))) as unknown;
+		if (typeof settings !== "object" || settings === null || Array.isArray(settings)) return "none";
+		const apiKeys = (settings as Record<string, unknown>).apiKeys;
+		if (typeof apiKeys !== "object" || apiKeys === null || Array.isArray(apiKeys)) return "none";
+		return Object.values(apiKeys).some((value) => typeof value === "string") ? "legacy" : "none";
+	} catch {
+		return "none";
+	}
+}
+
+export function initializeEmptyAuthJson(): void {
+	const authPath = join(getAgentDir(), "auth.json");
+	mkdirSync(dirname(authPath), { recursive: true, mode: 0o700 });
+	try {
+		writeFileSync(authPath, "{}\n", { encoding: "utf-8", flag: "wx", mode: 0o600 });
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+	}
+}
+
 /**
  * Migrate legacy oauth.json and settings.json apiKeys to auth.json.
  *
@@ -30,8 +58,11 @@ export function migrateAuthToAuthJson(): string[] {
 
 	const migrated: Record<string, unknown> = {};
 	const providers: string[] = [];
+	let migrateOauthFile = false;
+	let migratedSettings: string | undefined;
 
-	// Migrate oauth.json
+	// Read oauth.json without changing it. Legacy files are cleaned up only after
+	// auth.json has been created successfully, so a failed import does not lose credentials.
 	if (existsSync(oauthPath)) {
 		try {
 			const oauth = JSON.parse(stripBom(readFileSync(oauthPath, "utf-8")));
@@ -39,13 +70,13 @@ export function migrateAuthToAuthJson(): string[] {
 				migrated[provider] = { type: "oauth", ...(cred as object) };
 				providers.push(provider);
 			}
-			renameSync(oauthPath, `${oauthPath}.migrated`);
+			migrateOauthFile = true;
 		} catch {
 			// Skip on error
 		}
 	}
 
-	// Migrate settings.json apiKeys
+	// Read settings.json apiKeys without changing the source file.
 	if (existsSync(settingsPath)) {
 		try {
 			const content = readFileSync(settingsPath, "utf-8");
@@ -58,16 +89,40 @@ export function migrateAuthToAuthJson(): string[] {
 					}
 				}
 				delete settings.apiKeys;
-				writeFileSync(settingsPath, JSON.stringify(settings, null, 2));
+				migratedSettings = JSON.stringify(settings, null, 2);
 			}
 		} catch {
 			// Skip on error
 		}
 	}
 
-	if (Object.keys(migrated).length > 0) {
-		mkdirSync(dirname(authPath), { recursive: true });
-		writeFileSync(authPath, JSON.stringify(migrated, null, 2), { mode: 0o600 });
+	if (Object.keys(migrated).length === 0) return [];
+
+	mkdirSync(dirname(authPath), { recursive: true, mode: 0o700 });
+	try {
+		writeFileSync(authPath, JSON.stringify(migrated, null, 2), {
+			encoding: "utf-8",
+			flag: "wx",
+			mode: 0o600,
+		});
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "EEXIST") return [];
+		throw error;
+	}
+
+	if (migrateOauthFile) {
+		try {
+			renameSync(oauthPath, `${oauthPath}.migrated`);
+		} catch {
+			// auth.json is authoritative; leave the legacy source in place if cleanup fails.
+		}
+	}
+	if (migratedSettings !== undefined) {
+		try {
+			writeFileSync(settingsPath, migratedSettings, "utf-8");
+		} catch {
+			// auth.json is authoritative; leave the legacy source in place if cleanup fails.
+		}
 	}
 
 	return providers;
@@ -303,11 +358,14 @@ export async function showDeprecationWarnings(warnings: string[]): Promise<void>
  *
  * @returns Object with migration results and deprecation warnings
  */
-export function runMigrations(cwd: string): {
+export function runMigrations(
+	cwd: string,
+	options: { migrateAuth?: boolean } = {},
+): {
 	migratedAuthProviders: string[];
 	deprecationWarnings: string[];
 } {
-	const migratedAuthProviders = migrateAuthToAuthJson();
+	const migratedAuthProviders = options.migrateAuth === false ? [] : migrateAuthToAuthJson();
 	migrateSessionsFromAgentRoot();
 	migrateToolsToBin();
 	migrateKeybindingsConfigFile();

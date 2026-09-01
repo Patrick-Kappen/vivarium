@@ -2,7 +2,8 @@ import type { AuthResult } from "@earendil-works/pi-ai";
 import { APP_NAME } from "../config.ts";
 import type { Args } from "./args.ts";
 
-export type AuthCommandKind = "check" | "api_key" | "bearer_token";
+export type AuthCommandKind = "check" | "api_key" | "bearer_token" | "migrate";
+export type ProviderAuthCommandKind = Exclude<AuthCommandKind, "migrate">;
 
 export interface AuthCommand {
 	kind: AuthCommandKind;
@@ -19,10 +20,14 @@ const AUTH_COMMAND_USAGE: Record<AuthCommandKind, string> = {
 	check: `${APP_NAME} auth check --provider <provider> [--json] [--credentials] [--no-refresh]`,
 	api_key: `${APP_NAME} auth print-api-key --provider <provider> [--model <model>]`,
 	bearer_token: `${APP_NAME} auth print-bearer-token --provider <provider> [--model <model>] [--min-expiry <duration>]`,
+	migrate: `${APP_NAME} auth migrate`,
 };
 
 export function getAuthCommandName(kind: AuthCommandKind): string {
-	return kind === "check" ? "auth check" : kind === "api_key" ? "auth print-api-key" : "auth print-bearer-token";
+	if (kind === "check") return "auth check";
+	if (kind === "api_key") return "auth print-api-key";
+	if (kind === "bearer_token") return "auth print-bearer-token";
+	return "auth migrate";
 }
 
 export function getAuthCommandUsage(kind: AuthCommandKind): string {
@@ -41,8 +46,9 @@ export function printAuthCommandHelp(): void {
   pi auth print-api-key [--provider <provider>] [--model <model>]
   pi auth print-bearer-token [--provider <provider>] [--model <model>] [--min-expiry <duration>]
   pi auth check [--provider <provider>] [--model <model>] [--json] [--credentials] [--no-refresh]
+  pi auth migrate
 
-Auth commands require at least one of --provider or --model. Checks refresh expired OAuth credentials by default; --no-refresh prevents this. --credentials emits the credential, or includes it in JSON output.`);
+Provider auth commands require at least one of --provider or --model. Checks refresh expired OAuth credentials by default; --no-refresh prevents this. --credentials emits the credential, or includes it in JSON output. Migrate imports legacy oauth.json and settings.json apiKeys when auth.json does not exist.`);
 }
 
 export function parseAuthCommand(args: string[]): AuthCommand | undefined {
@@ -55,10 +61,12 @@ export function parseAuthCommand(args: string[]): AuthCommand | undefined {
 				? "api_key"
 				: args[1] === "print-bearer-token"
 					? "bearer_token"
-					: undefined;
+					: args[1] === "migrate"
+						? "migrate"
+						: undefined;
 	if (!kind) {
 		throw new AuthCommandError(
-			`Unknown auth command "${args[1] ?? ""}". Use "${APP_NAME} auth print-api-key", "${APP_NAME} auth print-bearer-token", or "${APP_NAME} auth check".`,
+			`Unknown auth command "${args[1] ?? ""}". Use "${APP_NAME} auth print-api-key", "${APP_NAME} auth print-bearer-token", "${APP_NAME} auth check", or "${APP_NAME} auth migrate".`,
 		);
 	}
 
@@ -95,7 +103,10 @@ export function parseAuthCommand(args: string[]): AuthCommand | undefined {
 		: { kind, args: commandArgs, json, credentials, noRefresh, minExpiryMs };
 }
 
-export function validateAuthCommandArgs(args: Args, kind: AuthCommandKind): { provider?: string; model?: string } {
+export function validateAuthCommandArgs(
+	args: Args,
+	kind: ProviderAuthCommandKind,
+): { provider?: string; model?: string } {
 	const provider = args.provider?.trim() || undefined;
 	const model = args.model?.trim() || undefined;
 	if (args.unknownFlags.size > 0) {

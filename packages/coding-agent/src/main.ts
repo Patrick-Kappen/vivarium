@@ -30,10 +30,19 @@ import { resolveCredentialForPrint } from "./cli/credential-print.ts";
 import { processFileArguments } from "./cli/file-processor.ts";
 import { buildInitialMessage } from "./cli/initial-message.ts";
 import { listModels } from "./cli/list-models.ts";
+import { requiresManagedAuthMigration, resolveManagedAuthStartupAction } from "./cli/managed-auth-startup.ts";
 import { createProjectTrustContext } from "./cli/project-trust.ts";
 import { selectSession } from "./cli/session-picker.ts";
 import { shouldRunFirstTimeSetup, showFirstTimeSetup, showStartupSelector } from "./cli/startup-ui.ts";
-import { APP_NAME, ENV_SESSION_DIR, expandTildePath, getAgentDir, getPackageDir, VERSION } from "./config.ts";
+import {
+	APP_NAME,
+	ENV_SESSION_DIR,
+	expandTildePath,
+	getAgentDir,
+	getPackageDir,
+	isVivariumManaged,
+	VERSION,
+} from "./config.ts";
 import { type CreateAgentSessionRuntimeFactory, createAgentSessionRuntime } from "./core/agent-session-runtime.ts";
 import {
 	type AgentSessionRuntimeDiagnostic,
@@ -62,7 +71,13 @@ import { SettingsManager } from "./core/settings-manager.ts";
 import { printTimings, resetTimings, time } from "./core/timings.ts";
 import { hasTrustRequiringProjectResources, ProjectTrustStore } from "./core/trust-manager.ts";
 import { builtInExtensions } from "./extensions/index.ts";
-import { runMigrations, showDeprecationWarnings } from "./migrations.ts";
+import {
+	getAuthMigrationState,
+	initializeEmptyAuthJson,
+	migrateAuthToAuthJson,
+	runMigrations,
+	showDeprecationWarnings,
+} from "./migrations.ts";
 import { InteractiveMode, runPrintMode, runRpcMode } from "./modes/index.ts";
 import { initTheme, stopThemeWatcher } from "./modes/interactive/theme/theme.ts";
 import { cleanupManagedInstall, handleConfigCommand, handlePackageCommand } from "./package-manager-cli.ts";
@@ -70,6 +85,8 @@ import { isLocalPath, normalizePath, resolvePath } from "./utils/paths.ts";
 import { cleanupWindowsSelfUpdateQuarantine } from "./utils/windows-self-update.ts";
 
 const EXTENSION_LOAD_FAILURE_HINT = `Hint: Start without extensions using "${APP_NAME} -ne".`;
+const MANAGED_AUTH_MIGRATION_REQUIRED_MESSAGE =
+	'Legacy credentials were found. Start this managed client interactively or rerun its launcher with "auth migrate".';
 
 /**
  * Read all content from piped stdin.
@@ -124,8 +141,12 @@ function toPrintOutputMode(appMode: AppMode): Exclude<Mode, "rpc"> {
 	return appMode === "json" ? "json" : "text";
 }
 
+function isRuntimeMetadataCommand(parsed: Args): boolean {
+	return parsed.help === true || parsed.listModels !== undefined;
+}
+
 function isPlainRuntimeMetadataCommand(parsed: Args): boolean {
-	return !parsed.print && parsed.mode === undefined && (parsed.help === true || parsed.listModels !== undefined);
+	return !parsed.print && parsed.mode === undefined && isRuntimeMetadataCommand(parsed);
 }
 
 async function runAuthCommand(args: string[]): Promise<boolean> {
@@ -144,6 +165,38 @@ async function runAuthCommand(args: string[]): Promise<boolean> {
 		return true;
 	}
 	if (!command) return false;
+
+	if (command.kind !== "migrate" && requiresManagedAuthMigration(isVivariumManaged(), getAuthMigrationState())) {
+		console.error(chalk.red(`Error: ${MANAGED_AUTH_MIGRATION_REQUIRED_MESSAGE}`));
+		process.exitCode = 1;
+		return true;
+	}
+
+	if (command.kind === "migrate") {
+		if (command.args.length > 0) {
+			console.error(chalk.red(`Error: ${getAuthCommandUsage(command.kind)} accepts no additional arguments.`));
+			process.exitCode = 1;
+			return true;
+		}
+		const migrationState = getAuthMigrationState();
+		if (migrationState === "initialized") {
+			process.stdout.write("auth.json already exists; no migration performed.\n");
+			return true;
+		}
+		if (migrationState === "none") {
+			process.stderr.write("No legacy credentials were found.\n");
+			process.exitCode = 1;
+			return true;
+		}
+		const migratedProviders = migrateAuthToAuthJson();
+		if (migratedProviders.length === 0 || getAuthMigrationState() !== "initialized") {
+			process.stderr.write("Legacy credential migration failed; auth.json was not created.\n");
+			process.exitCode = 1;
+			return true;
+		}
+		process.stdout.write(`Migrated credentials for: ${migratedProviders.join(", ")}\n`);
+		return true;
+	}
 
 	const parsed = parseArgs(command.args);
 	if (parsed.unknownFlags.size > 0) {
@@ -554,6 +607,46 @@ async function promptForMissingSessionCwd(
 	]);
 }
 
+async function initializeManagedAuthForStartup(options: {
+	appMode: AppMode;
+	metadataCommand: boolean;
+	settingsManager: SettingsManager;
+}): Promise<{ migratedProviders: string[]; exitCode?: number }> {
+	const action = resolveManagedAuthStartupAction({
+		managed: isVivariumManaged(),
+		authMigrationState: getAuthMigrationState(),
+		appMode: options.appMode,
+		metadataCommand: options.metadataCommand,
+	});
+	if (action === "none") return { migratedProviders: [] };
+	if (action === "error") {
+		console.error(chalk.red(`Error: ${MANAGED_AUTH_MIGRATION_REQUIRED_MESSAGE}`));
+		return { migratedProviders: [], exitCode: 1 };
+	}
+
+	const choice = await showStartupSelector(
+		options.settingsManager,
+		"Legacy credentials were found in this managed instance.\nChoose how to initialize auth.json.",
+		[
+			{ label: "Import legacy credentials", value: "import" as const },
+			{ label: "Start with an empty auth.json", value: "empty" as const },
+			{ label: "Cancel startup", value: "cancel" as const },
+		],
+	);
+	if (choice === undefined || choice === "cancel") return { migratedProviders: [], exitCode: 0 };
+	if (choice === "empty") {
+		initializeEmptyAuthJson();
+		return { migratedProviders: [] };
+	}
+
+	const migratedProviders = migrateAuthToAuthJson();
+	if (migratedProviders.length === 0 || getAuthMigrationState() !== "initialized") {
+		console.error(chalk.red("Error: Legacy credential migration failed; auth.json was not created."));
+		return { migratedProviders: [], exitCode: 1 };
+	}
+	return { migratedProviders };
+}
+
 export interface MainOptions {
 	extensionFactories?: InlineExtension[];
 }
@@ -644,8 +737,20 @@ export async function main(args: string[], options?: MainOptions) {
 	validateForkFlags(parsed);
 	validateSessionIdFlags(parsed);
 
-	// Run migrations (pass cwd for project-local migrations)
-	const { migratedAuthProviders: migratedProviders, deprecationWarnings } = runMigrations(cwd);
+	const managedAuthInitialization = await initializeManagedAuthForStartup({
+		appMode,
+		metadataCommand: isRuntimeMetadataCommand(parsed),
+		settingsManager: bootstrapSettingsManager,
+	});
+	if (managedAuthInitialization.exitCode !== undefined) {
+		process.exit(managedAuthInitialization.exitCode);
+	}
+
+	// Run migrations (pass cwd for project-local migrations). Managed auth was
+	// handled explicitly above so it is never imported without operator consent.
+	const migrationResult = runMigrations(cwd, { migrateAuth: !isVivariumManaged() });
+	const migratedProviders = [...managedAuthInitialization.migratedProviders, ...migrationResult.migratedAuthProviders];
+	const { deprecationWarnings } = migrationResult;
 	time("runMigrations");
 
 	const startupSettingsManager = SettingsManager.create(cwd, agentDir);
@@ -728,10 +833,19 @@ export async function main(args: string[], options?: MainOptions) {
 				parsed.projectTrustOverride ??
 				(!hasTrustRequiringResources || trustStore.get(cwd) === true));
 		const runtimeSettingsManager = SettingsManager.create(cwd, agentDir, { projectTrusted });
+		const initialModelRuntime =
+			isInitialRuntime && isRuntimeMetadataCommand(parsed)
+				? await ModelRuntime.create({
+						credentials: new ReadOnlyAuthStorage(),
+						allowModelNetwork: false,
+						signal: AbortSignal.timeout(15_000),
+					})
+				: undefined;
 		const services = await createAgentSessionServices({
 			cwd,
 			agentDir,
 			settingsManager: runtimeSettingsManager,
+			modelRuntime: initialModelRuntime,
 			modelRuntimeSignal: AbortSignal.timeout(15_000),
 			extensionFlagValues: parsed.unknownFlags,
 			resourceLoaderReloadOptions: shouldResolveProjectTrust
