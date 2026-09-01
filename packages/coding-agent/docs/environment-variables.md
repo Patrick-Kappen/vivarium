@@ -109,6 +109,11 @@ Vivarium deployments can separate operator-supplied configuration from writable 
 | `VIVARIUM_MODELS_PATH` | Absolute path to the `models.json` input. Pi loads the model configuration from this file instead of `PI_CODING_AGENT_DIR/models.json`, including for `pi update --models`. The `models-store.json` cache stays in the writable agent directory. |
 | `VIVARIUM_MANAGED` | `1` makes the selected settings and models inputs read-only. Changes made through `/settings`, saved model defaults (Ctrl+S in `/model`), and saved thinking defaults (Ctrl+S in `/thinking`) apply for the session but are never written back into the managed files; Pi records a settings error instead. In managed mode Pi also does not discover a global `SYSTEM.md` or `APPEND_SYSTEM.md` from the writable agent directory — trusted project `.pi` files still apply. |
 
+A path selected through `VIVARIUM_SETTINGS_PATH` or `VIVARIUM_MODELS_PATH`
+must exist. Pi treats a missing explicit input as a deployment error and does
+not create the file or its parent directory. The implicit settings and models
+files under `PI_CODING_AGENT_DIR` remain optional when no explicit path is set.
+
 Managed interactive sessions store only their last-seen changelog version in
 `PI_CODING_AGENT_DIR/managed-state.json`. This prevents repeated changelog and
 install-telemetry bookkeeping after an engine update without making the
