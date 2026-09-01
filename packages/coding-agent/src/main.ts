@@ -188,13 +188,21 @@ async function runAuthCommand(args: string[]): Promise<boolean> {
 			process.exitCode = 1;
 			return true;
 		}
-		const migratedProviders = migrateAuthToAuthJson();
-		if (migratedProviders.length === 0 || getAuthMigrationState() !== "initialized") {
-			process.stderr.write("Legacy credential migration failed; auth.json was not created.\n");
-			process.exitCode = 1;
+		const result = migrateAuthToAuthJson();
+		if (result.status === "migrated") {
+			process.stdout.write(`Migrated credentials for: ${result.providers.join(", ")}\n`);
 			return true;
 		}
-		process.stdout.write(`Migrated credentials for: ${migratedProviders.join(", ")}\n`);
+		if (result.status === "already_initialized") {
+			process.stdout.write("auth.json already exists; no migration performed.\n");
+			return true;
+		}
+		process.stderr.write(
+			result.status === "invalid_legacy"
+				? "Legacy credential migration failed because a source file is invalid.\n"
+				: "No usable legacy credentials were found; auth.json was not created.\n",
+		);
+		process.exitCode = 1;
 		return true;
 	}
 
@@ -626,7 +634,7 @@ async function initializeManagedAuthForStartup(options: {
 
 	const choice = await showStartupSelector(
 		options.settingsManager,
-		"Legacy credentials were found in this managed instance.\nChoose how to initialize auth.json.",
+		"Legacy credential files were found in this managed instance.\nChoose how to initialize auth.json.",
 		[
 			{ label: "Import legacy credentials", value: "import" as const },
 			{ label: "Start with an empty auth.json", value: "empty" as const },
@@ -639,12 +647,17 @@ async function initializeManagedAuthForStartup(options: {
 		return { migratedProviders: [] };
 	}
 
-	const migratedProviders = migrateAuthToAuthJson();
-	if (migratedProviders.length === 0 || getAuthMigrationState() !== "initialized") {
-		console.error(chalk.red("Error: Legacy credential migration failed; auth.json was not created."));
-		return { migratedProviders: [], exitCode: 1 };
-	}
-	return { migratedProviders };
+	const result = migrateAuthToAuthJson();
+	if (result.status === "migrated") return { migratedProviders: result.providers };
+	if (result.status === "already_initialized") return { migratedProviders: [] };
+	console.error(
+		chalk.red(
+			result.status === "invalid_legacy"
+				? "Error: Legacy credential migration failed because a source file is invalid."
+				: "Error: No usable legacy credentials were found; auth.json was not created.",
+		),
+	);
+	return { migratedProviders: [], exitCode: 1 };
 }
 
 export interface MainOptions {

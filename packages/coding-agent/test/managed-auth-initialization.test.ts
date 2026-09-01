@@ -37,7 +37,7 @@ describe("managed auth initialization", () => {
 
 	async function runManagedCli(
 		args: string[],
-		legacy: boolean,
+		legacy: boolean | "empty" | "invalid",
 	): Promise<{ authPath: string; code: number | null; stderr: string; stdout: string }> {
 		const root = mkdtempSync(join(tmpdir(), "pi-managed-auth-cli-"));
 		temporaryDirectories.push(root);
@@ -46,11 +46,15 @@ describe("managed auth initialization", () => {
 		mkdirSync(agentDir, { recursive: true });
 		mkdirSync(projectDir, { recursive: true });
 		if (legacy) {
-			writeFileSync(
-				join(agentDir, "oauth.json"),
-				JSON.stringify({ openai: { access: "synthetic-access", refresh: "synthetic-refresh", expires: 1 } }),
-				"utf8",
-			);
+			const oauthContent =
+				legacy === "empty"
+					? "{}"
+					: legacy === "invalid"
+						? "{malformed"
+						: JSON.stringify({
+								openai: { access: "synthetic-access", refresh: "synthetic-refresh", expires: 1 },
+							});
+			writeFileSync(join(agentDir, "oauth.json"), oauthContent, "utf8");
 		}
 
 		return await new Promise((resolvePromise, reject) => {
@@ -91,12 +95,17 @@ describe("managed auth initialization", () => {
 		expect(getAuthMigrationState()).toBe("initialized");
 	});
 
-	it("detects a legacy OAuth file without parsing or changing it", () => {
+	it("classifies empty OAuth state as new and malformed OAuth state as invalid", () => {
 		const agentDir = createAgentDir();
 		const oauthPath = join(agentDir, "oauth.json");
-		writeFileSync(oauthPath, "{malformed", "utf8");
+		writeFileSync(oauthPath, "{}", "utf8");
 
-		expect(getAuthMigrationState()).toBe("legacy");
+		expect(getAuthMigrationState()).toBe("none");
+		expect(migrateAuthToAuthJson()).toEqual({ status: "no_credentials" });
+		expect(readFileSync(oauthPath, "utf8")).toBe("{}");
+
+		writeFileSync(oauthPath, "{malformed", "utf8");
+		expect(getAuthMigrationState()).toBe("invalid");
 		expect(readFileSync(oauthPath, "utf8")).toBe("{malformed");
 	});
 
@@ -116,6 +125,7 @@ describe("managed auth initialization", () => {
 		writeFileSync(authPath, '{"openai":{"type":"api_key","key":"synthetic-existing"}}\n', "utf8");
 
 		initializeEmptyAuthJson();
+		expect(migrateAuthToAuthJson()).toEqual({ status: "already_initialized" });
 
 		expect(readFileSync(authPath, "utf8")).toContain("synthetic-existing");
 	});
@@ -125,7 +135,7 @@ describe("managed auth initialization", () => {
 		const oauthPath = join(agentDir, "oauth.json");
 		writeFileSync(oauthPath, "{malformed", "utf8");
 
-		expect(migrateAuthToAuthJson()).toEqual([]);
+		expect(migrateAuthToAuthJson()).toEqual({ status: "invalid_legacy" });
 
 		expect(existsSync(join(agentDir, "auth.json"))).toBe(false);
 		expect(readFileSync(oauthPath, "utf8")).toBe("{malformed");
@@ -147,7 +157,7 @@ describe("managed auth initialization", () => {
 		);
 
 		expect(getAuthMigrationState()).toBe("legacy");
-		expect(migrateAuthToAuthJson()).toEqual(["openai-codex"]);
+		expect(migrateAuthToAuthJson()).toEqual({ status: "migrated", providers: ["openai-codex"] });
 		expect(getAuthMigrationState()).toBe("initialized");
 		expect(existsSync(oauthPath)).toBe(false);
 		expect(existsSync(`${oauthPath}.migrated`)).toBe(true);
@@ -165,7 +175,7 @@ describe("managed auth initialization", () => {
 			"utf8",
 		);
 
-		expect(migrateAuthToAuthJson()).toEqual(["openai"]);
+		expect(migrateAuthToAuthJson()).toEqual({ status: "migrated", providers: ["openai"] });
 
 		expect(JSON.parse(readFileSync(join(agentDir, "auth.json"), "utf8"))).toMatchObject({
 			openai: { type: "api_key", key: "synthetic-settings-key" },
@@ -187,6 +197,7 @@ describe("managed auth initialization", () => {
 
 	it("requires explicit migration only for managed legacy state", () => {
 		expect(requiresManagedAuthMigration(true, "legacy")).toBe(true);
+		expect(requiresManagedAuthMigration(true, "invalid")).toBe(true);
 		expect(requiresManagedAuthMigration(false, "legacy")).toBe(false);
 		expect(requiresManagedAuthMigration(true, "initialized")).toBe(false);
 		expect(requiresManagedAuthMigration(true, "none")).toBe(false);
@@ -197,8 +208,11 @@ describe("managed auth initialization", () => {
 		[true, "initialized", "interactive", false, "none"],
 		[true, "none", "interactive", false, "none"],
 		[true, "legacy", "interactive", true, "none"],
+		[true, "invalid", "interactive", true, "none"],
 		[true, "legacy", "interactive", false, "prompt"],
+		[true, "invalid", "interactive", false, "prompt"],
 		[true, "legacy", "print", false, "error"],
+		[true, "invalid", "print", false, "error"],
 		[true, "legacy", "json", false, "error"],
 		[true, "legacy", "rpc", false, "error"],
 	] as const)(
@@ -221,6 +235,26 @@ describe("managed auth initialization", () => {
 		expect(result.code).toBe(0);
 		expect(`${result.stdout}\n${result.stderr}`.toLowerCase()).toContain(expectedOutput.toLowerCase());
 		expect(result.stderr).not.toContain("Legacy credentials were found");
+		expect(existsSync(result.authPath)).toBe(false);
+	});
+
+	it("migrates legacy credentials through the managed CLI", async () => {
+		const result = await runManagedCli(["auth", "migrate"], true);
+
+		expect(result.code).toBe(0);
+		expect(result.stdout).toContain("Migrated credentials for: openai");
+		expect(result.stderr).toBe("");
+		expect(existsSync(result.authPath)).toBe(true);
+	});
+
+	it.each([
+		["empty", "No legacy credentials were found."],
+		["invalid", "source file is invalid"],
+	] as const)("reports %s legacy state through auth migrate", async (legacy, expectedError) => {
+		const result = await runManagedCli(["auth", "migrate"], legacy);
+
+		expect(result.code).toBe(1);
+		expect(result.stderr).toContain(expectedError);
 		expect(existsSync(result.authPath)).toBe(false);
 	});
 
