@@ -84,6 +84,8 @@ These variables are read by Pi itself:
 | `VIVARIUM_MODELS_PATH` | Select an explicit `models.json` input independent of `PI_CODING_AGENT_DIR`; see [Managed configuration inputs](#managed-configuration-inputs) |
 | `VIVARIUM_MANAGED` | Set to `1` to mark the current profile externally managed and make its effective global settings read-only; see [Managed configuration inputs](#managed-configuration-inputs) |
 | `PI_PACKAGE_DIR` | Override the package directory, useful for Nix/Guix store paths |
+| `PI_SERVER_DIR` | Override the experimental server profile and socket directory; default is `~/.pi/server` |
+| `PI_SERVER_ID` | Select the logical experimental server ID when `--server-id` is omitted |
 | `PI_OFFLINE` | Disable startup network operations, including update checks, package updates, and install/update telemetry |
 | `PI_SKIP_VERSION_CHECK` | Disable the `pi.dev` latest-version request |
 | `PI_TELEMETRY` | Override install/update telemetry and provider attribution headers: `1`/`true`/`yes` or `0`/`false`/`no` |
