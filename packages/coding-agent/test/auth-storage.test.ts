@@ -139,11 +139,17 @@ describe("AuthStorage", () => {
 		expect(release).toHaveBeenCalledTimes(1);
 	});
 
-	test.skipIf(process.platform === "win32")("creates new auth files with owner-only permissions", () => {
-		AuthStorage.create(authJsonPath);
+	test.skipIf(process.platform === "win32")(
+		"creates new auth files with owner-only permissions on first write",
+		async () => {
+			const storage = AuthStorage.create(authJsonPath);
+			expect(existsSync(authJsonPath)).toBe(false);
 
-		expect(statSync(authJsonPath).mode & 0o777).toBe(0o600);
-	});
+			await storage.modify("anthropic", async () => ({ type: "api_key", key: "new" }));
+
+			expect(statSync(authJsonPath).mode & 0o777).toBe(0o600);
+		},
+	);
 
 	test.skipIf(process.platform === "win32")("preserves the mode of an existing auth file", async () => {
 		writeAuthJson({ anthropic: { type: "api_key", key: "old" } });
@@ -539,6 +545,37 @@ describe("AuthStorage", () => {
 
 		await expect(models.getAuth(providerId)).rejects.toMatchObject({ code: "auth" });
 		await expect(models.getAuth(providerId)).resolves.toMatchObject({ auth: { apiKey: "refreshed-access" } });
+	});
+
+	test("a read-only lock does not create the backing file", async () => {
+		const backend = new FileAuthStorageBackend(authJsonPath);
+
+		const syncResult = backend.withLock((current) => ({ result: current }));
+		expect(syncResult).toBeUndefined();
+		expect(existsSync(authJsonPath)).toBe(false);
+
+		const asyncResult = await backend.withLockAsync(async (current) => ({ result: current }));
+		expect(asyncResult).toBeUndefined();
+		expect(existsSync(authJsonPath)).toBe(false);
+
+		const storage = AuthStorage.create(authJsonPath);
+		expect(await storage.read("anthropic")).toBeUndefined();
+		expect(existsSync(authJsonPath)).toBe(false);
+	});
+
+	test("a writing lock creates the backing file owner-only", async () => {
+		const backend = new FileAuthStorageBackend(authJsonPath);
+		const data = JSON.stringify({ anthropic: { type: "api_key", key: "new" } });
+
+		await backend.withLockAsync(async (current) => {
+			expect(current).toBeUndefined();
+			return { result: undefined, next: data };
+		});
+
+		expect(readFileSync(authJsonPath, "utf8")).toBe(data);
+		if (process.platform !== "win32") {
+			expect(statSync(authJsonPath).mode & 0o777).toBe(0o600);
+		}
 	});
 
 	test("does not overwrite malformed auth files", async () => {
