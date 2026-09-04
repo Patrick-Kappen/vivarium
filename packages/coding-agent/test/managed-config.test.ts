@@ -475,12 +475,29 @@ describe("managed configuration inputs", () => {
 			expect(loader.getAppendSystemPromptSources()).toEqual([]);
 		});
 
-		it("still discovers a trusted project SYSTEM.md in managed mode", async () => {
+		it("ignores a trusted project SYSTEM.md and APPEND_SYSTEM.md in managed mode", async () => {
+			const piDir = join(cwd, ".pi");
+			mkdirSync(piDir, { recursive: true });
+			writeFileSync(join(piDir, "SYSTEM.md"), "Project system prompt.");
+			writeFileSync(join(piDir, "APPEND_SYSTEM.md"), "Project append instructions.");
+			writeFileSync(join(agentDir, "SYSTEM.md"), "Global system prompt.");
+			setEnv(ENV_MANAGED, "1");
+
+			const loader = new DefaultResourceLoader({ cwd, agentDir });
+			await loader.reload();
+
+			expect(loader.getSystemPrompt()).toBeUndefined();
+			expect(loader.getSystemPromptSource()).toBeUndefined();
+			expect(loader.getAppendSystemPrompt()).toEqual([]);
+			expect(loader.getAppendSystemPromptSources()).toEqual([]);
+		});
+
+		it("discovers a trusted project SYSTEM.md when Vivarium variables are absent", async () => {
 			const piDir = join(cwd, ".pi");
 			mkdirSync(piDir, { recursive: true });
 			writeFileSync(join(piDir, "SYSTEM.md"), "Project system prompt.");
 			writeFileSync(join(agentDir, "SYSTEM.md"), "Global system prompt.");
-			setEnv(ENV_MANAGED, "1");
+			setEnv(ENV_MANAGED, undefined);
 
 			const loader = new DefaultResourceLoader({ cwd, agentDir });
 			await loader.reload();
