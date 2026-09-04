@@ -1020,37 +1020,42 @@ export class DefaultResourceLoader implements ResourceLoader {
 		return { themes: Array.from(seen.values()), diagnostics };
 	}
 
+	// In managed mode the managing profile owns the system prompt: neither a
+	// trusted project's .pi/SYSTEM.md or APPEND_SYSTEM.md nor the writable
+	// agent directory may replace or extend it. Only the explicit
+	// --system-prompt and --append-system-prompt inputs the profile passes
+	// are honored, and those are applied by the caller, not discovered here.
 	private discoverSystemPromptFile(): string | undefined {
+		if (isVivariumManaged()) {
+			return undefined;
+		}
+
 		const projectPath = join(this.cwd, CONFIG_DIR_NAME, "SYSTEM.md");
 		if (this.settingsManager.isProjectTrusted() && existsSync(projectPath)) {
 			return projectPath;
 		}
 
-		// In managed mode the writable agent directory must not contribute a
-		// global SYSTEM.md; only project and explicit overrides are honored.
-		if (!isVivariumManaged()) {
-			const globalPath = join(this.agentDir, "SYSTEM.md");
-			if (existsSync(globalPath)) {
-				return globalPath;
-			}
+		const globalPath = join(this.agentDir, "SYSTEM.md");
+		if (existsSync(globalPath)) {
+			return globalPath;
 		}
 
 		return undefined;
 	}
 
 	private discoverAppendSystemPromptFile(): string | undefined {
+		if (isVivariumManaged()) {
+			return undefined;
+		}
+
 		const projectPath = join(this.cwd, CONFIG_DIR_NAME, "APPEND_SYSTEM.md");
 		if (this.settingsManager.isProjectTrusted() && existsSync(projectPath)) {
 			return projectPath;
 		}
 
-		// In managed mode the writable agent directory must not contribute a
-		// global APPEND_SYSTEM.md; only project and explicit overrides are honored.
-		if (!isVivariumManaged()) {
-			const globalPath = join(this.agentDir, "APPEND_SYSTEM.md");
-			if (existsSync(globalPath)) {
-				return globalPath;
-			}
+		const globalPath = join(this.agentDir, "APPEND_SYSTEM.md");
+		if (existsSync(globalPath)) {
+			return globalPath;
 		}
 
 		return undefined;
