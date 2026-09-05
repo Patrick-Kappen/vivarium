@@ -3233,6 +3233,7 @@ export class InteractiveMode {
 						this.hiddenThinkingLabel,
 						this.outputPad,
 						this.getMarkdownTransformers(),
+						this.session.extensionRunner.getMessageDecorators(),
 					);
 					this.streamingMessage = event.message;
 					this.chatContainer.addChild(this.streamingComponent);
@@ -3643,6 +3644,8 @@ export class InteractiveMode {
 								this.getMarkdownThemeWithSettings(),
 								this.outputPad,
 								this.getMarkdownTransformers(),
+								this.session.extensionRunner.getMessageDecorators(),
+								message.timestamp,
 							);
 							this.chatContainer.addChild(userComponent);
 						}
@@ -3652,6 +3655,8 @@ export class InteractiveMode {
 							this.getMarkdownThemeWithSettings(),
 							this.outputPad,
 							this.getMarkdownTransformers(),
+							this.session.extensionRunner.getMessageDecorators(),
+							message.timestamp,
 						);
 						this.chatContainer.addChild(userComponent);
 					}
@@ -3669,6 +3674,7 @@ export class InteractiveMode {
 					this.hiddenThinkingLabel,
 					this.outputPad,
 					this.getMarkdownTransformers(),
+					this.session.extensionRunner.getMessageDecorators(),
 				);
 				this.chatContainer.addChild(assistantComponent);
 				break;

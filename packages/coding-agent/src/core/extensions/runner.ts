@@ -40,6 +40,7 @@ import type {
 	InputSource,
 	LoadExtensionsResult,
 	MarkdownTransformer,
+	MessageDecorator,
 	MessageEndEvent,
 	MessageEndEventResult,
 	MessageRenderer,
@@ -638,6 +639,27 @@ export class ExtensionRunner {
 
 	getMarkdownTransformers(): MarkdownTransformer[] {
 		return this.extensions.flatMap((ext) => (ext.markdownTransformer ? [ext.markdownTransformer] : []));
+	}
+
+	getMessageDecorators(): MessageDecorator[] {
+		return this.extensions.flatMap((ext) => {
+			const decorate = ext.messageDecorator;
+			if (!decorate) return [];
+			const guarded: MessageDecorator = (content, context) => {
+				try {
+					return decorate(content, context);
+				} catch (error) {
+					this.emitError({
+						extensionPath: ext.path,
+						event: "message_decorator",
+						error: error instanceof Error ? error.message : String(error),
+						stack: error instanceof Error ? error.stack : undefined,
+					});
+					return content;
+				}
+			};
+			return [guarded];
+		});
 	}
 
 	getEntryRenderer(customType: string): EntryRenderer | undefined {

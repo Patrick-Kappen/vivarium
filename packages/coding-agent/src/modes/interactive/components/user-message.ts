@@ -1,5 +1,5 @@
-import { Box, Container, Markdown, type MarkdownTheme } from "@earendil-works/pi-tui";
-import type { MarkdownTransformer } from "../../../core/extensions/types.ts";
+import { Box, type Component, Container, Markdown, type MarkdownTheme } from "@earendil-works/pi-tui";
+import type { MarkdownTransformer, MessageDecorator } from "../../../core/extensions/types.ts";
 import { getMarkdownTheme, theme } from "../theme/theme.ts";
 import { createMarkdownTransform } from "./markdown-transform.ts";
 
@@ -15,18 +15,24 @@ export class UserMessageComponent extends Container {
 	private markdownTheme: MarkdownTheme;
 	private outputPad: number;
 	private markdownTransformers: readonly MarkdownTransformer[];
+	private messageDecorators: readonly MessageDecorator[];
+	private timestamp: number | undefined;
 
 	constructor(
 		text: string,
 		markdownTheme: MarkdownTheme = getMarkdownTheme(),
 		outputPad = 1,
 		markdownTransformers: readonly MarkdownTransformer[] = [],
+		messageDecorators: readonly MessageDecorator[] = [],
+		timestamp?: number,
 	) {
 		super();
 		this.text = text;
 		this.markdownTheme = markdownTheme;
 		this.outputPad = outputPad;
 		this.markdownTransformers = markdownTransformers;
+		this.messageDecorators = messageDecorators;
+		this.timestamp = timestamp;
 		this.rebuild();
 	}
 
@@ -54,7 +60,20 @@ export class UserMessageComponent extends Container {
 				},
 			),
 		);
-		this.addChild(contentBox);
+		const context = {
+			role: "user" as const,
+			timestamp: this.timestamp,
+			isStreaming: false,
+			get theme() {
+				return theme;
+			},
+		};
+		this.addChild(
+			this.messageDecorators.reduce<Component>(
+				(content, decorate) => decorate(content, context) ?? content,
+				contentBox,
+			),
+		);
 	}
 
 	override render(width: number): string[] {

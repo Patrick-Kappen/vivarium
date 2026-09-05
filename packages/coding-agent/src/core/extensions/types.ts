@@ -1206,6 +1206,18 @@ export interface MarkdownTransformContext {
 
 export type MarkdownTransformer = (markdown: string, context: MarkdownTransformContext) => string;
 
+/** Live presentation metadata. Read inside render() to observe streaming and theme changes. */
+export interface MessageDecorationContext {
+	readonly role: "user" | "assistant";
+	/** Original message time in Unix milliseconds; absent for standalone components. */
+	readonly timestamp: number | undefined;
+	readonly isStreaming: boolean;
+	readonly theme: Theme;
+}
+
+/** Wrap existing content without changing messages. Preserve rendering, invalidation and mouse dispatch. */
+export type MessageDecorator = (content: Component, context: MessageDecorationContext) => Component | undefined;
+
 export interface EntryRenderOptions {
 	expanded: boolean;
 }
@@ -1353,6 +1365,9 @@ export interface ExtensionAPI {
 
 	/** Register a transformer for user and assistant Markdown before Pi renders it in the interactive transcript. */
 	registerMarkdownTransformer(transformer: MarkdownTransformer): void;
+
+	/** Decorate ordinary user/assistant content in the interactive transcript. One per extension; load-order chaining. */
+	registerMessageDecorator(decorator: MessageDecorator): void;
 
 	/** Register a custom renderer for CustomEntry. Custom entries do not participate in LLM context. */
 	registerEntryRenderer<T = unknown>(customType: string, renderer: EntryRenderer<T>): void;
@@ -1771,6 +1786,7 @@ export interface Extension {
 	tools: Map<string, RegisteredTool>;
 	messageRenderers: Map<string, MessageRenderer>;
 	markdownTransformer?: MarkdownTransformer;
+	messageDecorator?: MessageDecorator;
 	entryRenderers?: Map<string, EntryRenderer>;
 	commands: Map<string, RegisteredCommand>;
 	flags: Map<string, ExtensionFlag>;
