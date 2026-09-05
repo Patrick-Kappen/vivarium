@@ -97,6 +97,8 @@ export type {
 	LsToolResultEvent,
 	MarkdownTransformContext,
 	MarkdownTransformer,
+	MessageDecorationContext,
+	MessageDecorator,
 	// Events - Message
 	MessageEndEvent,
 	MessageRenderer,

@@ -102,6 +102,8 @@ export type {
 	LsToolCallEvent,
 	MarkdownTransformContext,
 	MarkdownTransformer,
+	MessageDecorationContext,
+	MessageDecorator,
 	MessageEndEvent,
 	MessageRenderer,
 	MessageRenderOptions,

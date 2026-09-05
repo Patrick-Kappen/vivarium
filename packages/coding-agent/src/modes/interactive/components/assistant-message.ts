@@ -1,6 +1,14 @@
 import type { AssistantMessage } from "@earendil-works/pi-ai";
-import { Container, Markdown, type MarkdownTheme, MouseRegion, Spacer, Text } from "@earendil-works/pi-tui";
-import type { MarkdownTransformer } from "../../../core/extensions/types.ts";
+import {
+	type Component,
+	Container,
+	Markdown,
+	type MarkdownTheme,
+	MouseRegion,
+	Spacer,
+	Text,
+} from "@earendil-works/pi-tui";
+import type { MarkdownTransformer, MessageDecorator } from "../../../core/extensions/types.ts";
 import { getMarkdownTheme, theme } from "../theme/theme.ts";
 import { createMarkdownTransform } from "./markdown-transform.ts";
 
@@ -30,6 +38,7 @@ export class AssistantMessageComponent extends Container {
 		hiddenThinkingLabel = "Thinking...",
 		outputPad = 1,
 		markdownTransformers: readonly MarkdownTransformer[] = [],
+		messageDecorators: readonly MessageDecorator[] = [],
 	) {
 		super();
 
@@ -38,10 +47,29 @@ export class AssistantMessageComponent extends Container {
 		this.hiddenThinkingLabel = hiddenThinkingLabel;
 		this.outputPad = outputPad;
 		this.markdownTransformers = markdownTransformers;
+		this.lastMessage = message;
 
 		// Container for text/thinking content
 		this.contentContainer = new Container();
-		this.addChild(this.contentContainer);
+		const component = this;
+		const context = {
+			role: "assistant" as const,
+			get timestamp() {
+				return component.lastMessage?.timestamp;
+			},
+			get isStreaming() {
+				return component.isStreaming;
+			},
+			get theme() {
+				return theme;
+			},
+		};
+		this.addChild(
+			messageDecorators.reduce<Component>(
+				(content, decorate) => decorate(content, context) ?? content,
+				this.contentContainer,
+			),
+		);
 
 		if (message) {
 			this.updateContent(message);
