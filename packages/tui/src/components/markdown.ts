@@ -2,7 +2,7 @@ import { Marked, type Token, Tokenizer, type TokenizerExtension, type Tokens } f
 import { renderLatex } from "../latex.ts";
 import { MarkdownSelection } from "../markdown-selection.ts";
 import { composeVerticalSelection } from "../selection-compose.ts";
-import type { CopySource } from "../selection-map.ts";
+import { type CopySource, joinSelectionMaps } from "../selection-map.ts";
 import { getCapabilities, hyperlink, isImageLine } from "../terminal-image.ts";
 import type { Component } from "../tui.ts";
 import { applyBackgroundToLine, visibleWidth, wrapTextWithAnsi } from "../utils.ts";
@@ -531,9 +531,11 @@ export class Markdown implements Component {
 						: latexToken.raw.trim();
 				for (const line of rendered.split("\n")) {
 					lines.push(this.applyDefaultStyle(line));
+					selection?.text(lines, lines.length - 1);
 				}
 				if (nextTokenType && nextTokenType !== "space") {
 					lines.push("");
+					selection?.decoration(lines, lines.length - 1);
 				}
 				break;
 			}
@@ -563,8 +565,9 @@ export class Markdown implements Component {
 			}
 
 			case "list": {
-				const listLines = this.renderList(token as Tokens.List, 0, width, styleContext);
+				const listLines = this.renderList(token as Tokens.List, 0, width, styleContext, selection);
 				lines.push(...listLines);
+				if (selection) joinSelectionMaps(lines, [listLines]);
 				// Don't add spacing after lists if a space token follows
 				// (the space token will handle it)
 				break;
@@ -793,8 +796,15 @@ export class Markdown implements Component {
 	/**
 	 * Render a list with proper nesting support
 	 */
-	private renderList(token: Tokens.List, depth: number, width: number, styleContext?: InlineStyleContext): string[] {
+	private renderList(
+		token: Tokens.List,
+		depth: number,
+		width: number,
+		styleContext?: InlineStyleContext,
+		selection?: MarkdownSelection,
+	): string[] {
 		const lines: string[] = [];
+		const blocks: string[][] = [];
 		const indent = "    ".repeat(depth);
 		// Use the list's start property (defaults to 1 for ordered lists)
 		const startNumber = typeof token.start === "number" ? token.start : 1;
@@ -818,30 +828,55 @@ export class Markdown implements Component {
 
 			for (const itemToken of item.tokens) {
 				if (itemToken.type === "list") {
-					lines.push(...this.renderList(itemToken as Tokens.List, depth + 1, width, styleContext));
+					const nested = this.renderList(itemToken as Tokens.List, depth + 1, width, styleContext, selection);
+					lines.push(...nested);
+					blocks.push(nested);
 					renderedAnyLine = true;
 					continue;
 				}
 
-				const itemLines = this.renderToken(itemToken, itemWidth, undefined, styleContext);
-				for (const line of itemLines) {
-					for (const wrappedLine of wrapTextWithAnsi(line, itemWidth)) {
-						const linePrefix = renderedAnyLine ? continuationPrefix : firstPrefix;
-						lines.push(linePrefix + wrappedLine);
-						renderedAnyLine = true;
+				const itemLines = this.renderToken(itemToken, itemWidth, undefined, styleContext, selection);
+				if (selection) {
+					const first = !renderedAnyLine;
+					const prefixes: string[] = [];
+					const wrapped = selection.wrap([itemLines], itemWidth, {
+						wrapImages: true,
+						onWrappedLine: () => {
+							prefixes.push(renderedAnyLine ? continuationPrefix : firstPrefix);
+							renderedAnyLine = true;
+						},
+					});
+					const prefixed = wrapped.map((line, row) => prefixes[row]! + line);
+					selection.decoratePrefix(prefixed, wrapped, prefixes, first);
+					blocks.push(prefixed);
+					lines.push(...prefixed);
+				} else
+					for (const line of itemLines) {
+						for (const wrappedLine of wrapTextWithAnsi(line, itemWidth)) {
+							const linePrefix = renderedAnyLine ? continuationPrefix : firstPrefix;
+							lines.push(linePrefix + wrappedLine);
+							renderedAnyLine = true;
+						}
 					}
-				}
 			}
 
 			if (!renderedAnyLine) {
-				lines.push(firstPrefix);
+				const empty = [firstPrefix];
+				selection?.decoratePrefix(empty, [""], [firstPrefix], true);
+				blocks.push(empty);
+				lines.push(...empty);
 			}
 
 			if (token.loose && !isLastItem) {
-				lines.push("");
+				const gap = [""];
+				selection?.text(gap, 0);
+				const rendered = selection?.wrap([gap], width) ?? gap;
+				blocks.push(rendered);
+				lines.push(...rendered);
 			}
 		}
 
+		if (selection) joinSelectionMaps(lines, blocks);
 		return lines;
 	}
 

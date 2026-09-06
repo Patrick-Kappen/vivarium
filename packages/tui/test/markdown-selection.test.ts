@@ -6,6 +6,7 @@ import { Text } from "../src/components/text.ts";
 import { MarkdownSelection } from "../src/markdown-selection.ts";
 import { getSelectionMap, selectionText, setSelectionMap } from "../src/selection-map.ts";
 import { getCapabilities, setCapabilities } from "../src/terminal-image.ts";
+import { stripTerminalSequences } from "../src/utils.ts";
 import { select, withSelection } from "./selection-test-utils.ts";
 
 const identity = (text: string) => text;
@@ -152,6 +153,181 @@ describe("Markdown emission selection metadata", () => {
 			fixture.tui.renderNow();
 			assert.equal(await fixture.tui.copyActiveSelectionToClipboard(), true);
 			assert.deepEqual(fixture.copied, ["first paragraph"]);
+		});
+	});
+
+	for (const mode of ["implicit", "scroll", "viewport"] as const) {
+		it(`copies list markers without continuation padding or visual newlines (${mode})`, async () => {
+			for (const width of [8, 16, 40]) {
+				const component = new Markdown("- alpha beta gamma\n- second", 1, 1, theme);
+				await withSelection(component, width, mode, async (fixture) => {
+					select(fixture, 0, 0, width - 1, component.render(width).length - 1);
+					assert.equal(await fixture.tui.copyActiveSelectionToClipboard(), true);
+					assert.deepEqual(fixture.copied, ["- alpha beta gamma\n- second"]);
+				});
+			}
+		});
+
+		it(`copies a partial list body without its marker (${mode})`, async () => {
+			const component = new Markdown("- alpha beta gamma", 0, 0, theme);
+			await withSelection(component, 12, mode, async (fixture) => {
+				select(fixture, 2, 0, 11, component.render(12).length - 1);
+				assert.equal(await fixture.tui.copyActiveSelectionToClipboard(), true);
+				assert.deepEqual(fixture.copied, ["alpha beta gamma"]);
+			});
+		});
+
+		it(`preserves canonical nested list markers and task state (${mode})`, async () => {
+			for (const width of [8, 16, 40]) {
+				const component = new Markdown("- outer\n  - inner words wrap\n- [x] done", 1, 1, theme);
+				await withSelection(component, width, mode, async (fixture) => {
+					select(fixture, 0, 0, width - 1, component.render(width).length - 1);
+					assert.equal(await fixture.tui.copyActiveSelectionToClipboard(), true);
+					assert.deepEqual(fixture.copied, ["- outer\n    - inner words wrap\n- [x] done"]);
+				});
+			}
+		});
+
+		it(`copies code selected inside a list without either presentation indent (${mode})`, async () => {
+			const source = "function f() {\n\n  return 1;\n}";
+			const input = `- item\n\n  \x60\x60\x60js\n${source
+				.split("\n")
+				.map((line) => `  ${line}`)
+				.join("\n")}\n  \x60\x60\x60`;
+			const component = new Markdown(input, 1, 1, theme);
+			await withSelection(component, 40, mode, async (fixture) => {
+				const lines = component.render(40).map(stripTerminalSequences);
+				const first = lines.findIndex((line) => line.includes("function f()"));
+				const last = lines.findIndex((line) => line.trim() === "}");
+				assert.ok(first >= 0 && last > first);
+				select(fixture, 0, first, 39, last);
+				assert.equal(await fixture.tui.copyActiveSelectionToClipboard(), true);
+				assert.deepEqual(fixture.copied, [source]);
+			});
+		});
+
+		it(`forwards quote content inside a list (${mode})`, async () => {
+			for (const width of [8, 16, 40]) {
+				const component = new Markdown("- > alpha beta gamma", 1, 1, theme);
+				await withSelection(component, width, mode, async (fixture) => {
+					select(fixture, 0, 0, width - 1, component.render(width).length - 1);
+					assert.equal(await fixture.tui.copyActiveSelectionToClipboard(), true);
+					assert.deepEqual(fixture.copied, ["- alpha beta gamma"]);
+				});
+			}
+		});
+
+		it(`copies the rendered block formula, including its intrinsic alignment (${mode})`, async () => {
+			for (const width of [8, 20, 40]) {
+				const component = new Markdown(
+					String.raw`\[E \approx \frac{0.1\ \text{lux}}{100\ \text{lm/W}}\]`,
+					1,
+					1,
+					theme,
+				);
+				await withSelection(component, width, mode, async (fixture) => {
+					select(fixture, 0, 0, width - 1, component.render(width).length - 1);
+					assert.equal(await fixture.tui.copyActiveSelectionToClipboard(), true);
+					assert.deepEqual(fixture.copied, [
+						"    0.1 lux\nE \u2248 \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n    100 lm/W",
+					]);
+				});
+			}
+		});
+	}
+
+	for (const preserveOrderedListMarkers of [false, true]) {
+		it(`copies the displayed ordered-list numbering (preserve=${preserveOrderedListMarkers})`, async () => {
+			const component = new Markdown("1. first\n7. second", 0, 0, theme, undefined, { preserveOrderedListMarkers });
+			await withSelection(component, 20, "scroll", async (fixture) => {
+				select(fixture, 0, 0, 19, component.render(20).length - 1);
+				assert.equal(await fixture.tui.copyActiveSelectionToClipboard(), true);
+				assert.deepEqual(fixture.copied, [
+					preserveOrderedListMarkers ? "1. first\n7. second" : "1. first\n2. second",
+				]);
+			});
+		});
+	}
+
+	it("preserves nested list structure inside a quote", async () => {
+		for (const width of [8, 16, 40]) {
+			const component = new Markdown("> - alpha beta gamma\n>   - child", 1, 1, theme);
+			await withSelection(component, width, "scroll", async (fixture) => {
+				select(fixture, 0, 0, width - 1, component.render(width).length - 1);
+				assert.equal(await fixture.tui.copyActiveSelectionToClipboard(), true);
+				assert.deepEqual(fixture.copied, ["- alpha beta gamma\n    - child"]);
+			});
+		}
+	});
+
+	it("retains loose-list separation and empty markers", async () => {
+		for (const source of ["- first\n\n- second", "-\n-\n- end"]) {
+			const component = new Markdown(source, 0, 0, theme);
+			await withSelection(component, 30, "scroll", async (fixture) => {
+				select(fixture, 0, 0, 29, component.render(30).length - 1);
+				assert.equal(await fixture.tui.copyActiveSelectionToClipboard(), true);
+				assert.deepEqual(fixture.copied, [source]);
+			});
+		}
+	});
+
+	it("does not restore hidden leading source when joining a semantic marker", () => {
+		const body = ["visible"];
+		setSelectionMap(body, () => [
+			[{ source: { text: "hidden visible" }, start: 7, end: 14, columnStart: 0, columnEnd: 7 }],
+		]);
+		const lines = ["- visible"];
+		new MarkdownSelection([]).decoratePrefix(lines, body, ["- "], true);
+		assert.equal(
+			selectionText(lines, getSelectionMap(lines), 0, 0, () => ({ start: 0, end: 20 }), 20),
+			"- visible",
+		);
+	});
+
+	it("joins a marker only to its first body's layout lane", () => {
+		const source = { text: "abc" };
+		const body = ["c abc"];
+		setSelectionMap(body, () => [
+			[
+				{ source, flow: "first", start: 2, end: 3, columnStart: 0, columnEnd: 1 },
+				{ source, flow: "second", start: 0, end: 3, columnStart: 2, columnEnd: 5 },
+			],
+		]);
+		const lines = ["- c abc"];
+		new MarkdownSelection([]).decoratePrefix(lines, body, ["- "], true);
+		assert.equal(
+			selectionText(lines, getSelectionMap(lines), 0, 0, () => ({ start: 0, end: 20 }), 20),
+			"- c\tabc",
+		);
+	});
+
+	it("keeps rewritten code in a list local to visible legacy output", async () => {
+		const component = new Markdown("- ```\n  original\n  ```", 0, 0, { ...theme, highlightCode: () => ["changed"] });
+		await withSelection(component, 30, "scroll", async (fixture) => {
+			select(fixture, 0, 0, 29, component.render(30).length - 1);
+			assert.equal(await fixture.tui.copyActiveSelectionToClipboard(), true);
+			assert.deepEqual(fixture.copied, ["-   changed"]);
+		});
+	});
+
+	it("retains visible literal math syntax when rendering is disabled", async () => {
+		const component = new Markdown("$$\nx^2\n$$", 0, 0, theme, undefined, { renderLatex: false });
+		await withSelection(component, 20, "scroll", async (fixture) => {
+			select(fixture, 0, 0, 19, component.render(20).length - 1);
+			assert.equal(await fixture.tui.copyActiveSelectionToClipboard(), true);
+			assert.deepEqual(fixture.copied, ["$$\nx^2\n$$"]);
+		});
+	});
+
+	it("keeps list selection through measurement renders and appended items", async () => {
+		const component = new Markdown("- first paragraph", 0, 0, theme);
+		await withSelection(component, 30, "scroll", async (fixture) => {
+			select(fixture, 0, 0, 16, 0);
+			component.render(8);
+			component.setText("- first paragraph\n- second paragraph");
+			fixture.tui.renderNow();
+			assert.equal(await fixture.tui.copyActiveSelectionToClipboard(), true);
+			assert.deepEqual(fixture.copied, ["- first paragraph"]);
 		});
 	});
 

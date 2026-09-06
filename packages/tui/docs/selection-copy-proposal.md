@@ -2,7 +2,7 @@
 
 Status: draft internal Text and layout/fullscreen integration. Text, Box, VStack
 and HStack forward source metadata. Basic Markdown emission is now mapped, but
-list/table coverage, lexer provenance and extension integration remain unfinished.
+table coverage, lexer provenance and extension integration remain unfinished.
 No public selection API is exported.
 Baseline: Vivarium `d0e76d057` (merged Pi 0.85.1 synchronization).
 
@@ -91,12 +91,13 @@ newlines/blank lines, omitted wrap spaces, styling, tabs before expansion and
 wide/combining/emoji graphemes. Existing wrapping tests remain the independent
 render-output regression check.
 
-### Initial Markdown coverage
+### Markdown coverage
 
 `MarkdownSelection` records logical visible text at emission sites, before wrapping
-and margins. Paragraphs, inline formatting/links, headings and code blocks now
-have source maps, including supported content inside recursively nested quotes. Heading prefixes, code fences, code presentation
-indent and horizontal rules are explicitly decoration, not stripped heuristically
+and margins. Paragraphs, inline formatting/links, headings, code blocks, lists and
+display math now have source maps, including supported content inside recursively
+nested quotes and lists. Heading prefixes, code fences, code presentation indent
+and horizontal rules are explicitly decoration, not stripped heuristically
 at copy time. Literal identical characters inside code remain content.
 
 Code spans reference one token-text source across its real lines and soft wraps,
@@ -113,21 +114,33 @@ empty quote rows and invokes quote styling/border callbacks in the same order.
 Inherited block metadata is resolved once per wrapped snapshot, not rescanned for
 every row; a read-count regression guards against quadratic validation work.
 
+List markers, displayed numbering, task state and canonical nesting indentation
+are content; continuation prefixes are decoration. A semantic marker joins its
+first body's source and lane, starting at the first mapped source offset rather
+than restoring hidden leading data. Compositions use a bounded weak source cache.
+Loose-list separation remains explicit content. Further wrapping retains mapped
+whitespace omitted at recorded wrap boundaries, including nesting indentation in
+very narrow quotes; it does not turn unmarked continuation padding into content.
+
+Display math copies its rendered Unicode rows and intrinsic alignment, without
+hidden LaTeX delimiters. Delimiters remain content when disabled or unsupported
+math rendering leaves them visibly printed. Formula layout is not outer padding.
+
 Unchanged logical sources survive incidental measurement renders and unrelated
-paragraph appends. A streamed partial closing fence remains excluded when the
+paragraph or list-item appends. A streamed partial closing fence remains excluded when the
 closing fence completes. Old rendered snapshots do not read later Markdown state.
 Zero-cell blank anchors outside a clipped pane cannot select the neighbouring pane.
 
-This is deliberately incomplete: lists, tables and block math still have legacy
-content rows. Their nested children also remain legacy; an enclosing mapped quote
-can exclude its own border without claiming those bodies are source-aware. Inputs containing tabs or
-CR currently keep the whole Markdown component unmapped because preprocessing and
+This is deliberately incomplete: tables and unknown token output retain legacy
+content rows. Enclosing mapped lists and quotes exclude their own presentation
+without claiming those bodies are source-aware. Inputs containing tabs or CR
+currently keep the whole Markdown component unmapped because preprocessing and
 lexer normalization do not yet carry their original offsets. LF code token text
 is supported; this is not an original-Markdown-byte preservation guarantee.
 Multiple source blank lines collapsed by the renderer are not reconstructed.
 The existing general separator/occlusion and public API limitations still apply.
 
-`../test/markdown-selection.test.ts` contains 35 focused regressions. Existing Markdown
+`../test/markdown-selection.test.ts` contains 62 focused regressions. Existing Markdown
 render tests remain the independent check that presentation is unchanged. All of
 the remaining cases must be addressed before claiming complete message copying.
 

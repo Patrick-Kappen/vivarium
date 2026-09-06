@@ -16,6 +16,9 @@ interface MarkdownLineSource {
 	offset: number;
 }
 
+// One live composition per source bounds cache growth while retaining identity on ordinary rerenders.
+const prefixedSources = new WeakMap<CopySource, { prefix: string; start: number; source: CopySource }>();
+
 /** Metadata recorded at Markdown emission sites, before visual wrapping or margins. */
 export class MarkdownSelection {
 	readonly sources: CopySource[] = [];
@@ -72,20 +75,47 @@ export class MarkdownSelection {
 		}
 	}
 
-	decoratePrefix(result: string[], content: string[], prefixes: readonly string[]): void {
+	decoratePrefix(result: string[], content: string[], prefixes: readonly string[], semanticFirstPrefix = false): void {
 		const height = result.length;
+		const marker = semanticFirstPrefix ? this.source(stripTerminalSequences(prefixes[0] ?? "")) : undefined;
 		setSelectionMap(result, () => {
 			const map = getSelectionMap(content);
+			const rows = content.map((line, row) => map?.[row] ?? legacySelectionRow(line));
+			const first = marker ? rows.find((row) => row.length > 0)?.[0] : undefined;
+			let source = marker;
+			if (marker && first) {
+				const previous = prefixedSources.get(first.source);
+				if (previous?.prefix === marker.text && previous.start === first.start) source = previous.source;
+				else {
+					// Start at the first mapped offset: a marker must not resurrect hidden leading content.
+					source = { text: marker.text + first.source.text.slice(first.start), legacy: first.source.legacy };
+					prefixedSources.set(first.source, { prefix: marker.text, start: first.start, source });
+				}
+			}
+			let joined = false;
 			return Array.from({ length: height }, (_, row) => {
 				if (row >= content.length) return [];
 				const prefix = prefixes[row]!;
 				if (prefix.includes("\t")) return undefined;
 				const offset = visibleWidth(prefix);
-				return (map?.[row] ?? legacySelectionRow(content[row]!)).map((span) => ({
-					...span,
-					columnStart: span.columnStart + offset,
-					columnEnd: span.columnEnd + offset,
-				}));
+				const spans = rows[row]!.map((span) => {
+					const placed = { ...span, columnStart: span.columnStart + offset, columnEnd: span.columnEnd + offset };
+					if (!source || !marker || !first || span.source !== first.source || span.flow !== first.flow)
+						return placed;
+					const breakBefore = joined ? span.breakBefore : false;
+					joined = true;
+					return {
+						...placed,
+						source,
+						breakBefore,
+						start: span.start - first.start + marker.text.length,
+						end: span.end - first.start + marker.text.length,
+					};
+				});
+				if (row === 0 && source) {
+					return [...legacySelectionRow(prefix).map((span) => ({ ...span, source, flow: first?.flow })), ...spans];
+				}
+				return spans;
 			});
 		});
 	}
@@ -93,7 +123,12 @@ export class MarkdownSelection {
 	wrap(
 		blocks: readonly string[][],
 		width: number,
-		options: { style?: (line: string) => string; trimEmptyEnd?: boolean; onWrappedLine?: () => void } = {},
+		options: {
+			style?: (line: string) => string;
+			trimEmptyEnd?: boolean;
+			onWrappedLine?: () => void;
+			wrapImages?: boolean;
+		} = {},
 	): string[] {
 		const result: string[] = [];
 		const builders: Array<() => readonly (readonly CopySpan[] | undefined)[]> = [];
@@ -102,7 +137,7 @@ export class MarkdownSelection {
 		if (options.trimEmptyEnd) while (inputs.at(-1)?.original === "") inputs.pop();
 		for (const { block, original, index } of inputs) {
 			const line = options.style ? options.style(original) : original;
-			if (isImageLine(line) && !options.style) {
+			if (isImageLine(line) && !options.style && !options.wrapImages) {
 				result.push(line);
 				builders.push(() => [undefined]);
 				continue;
@@ -126,12 +161,20 @@ export class MarkdownSelection {
 						const start = visibleWidth(line.slice(0, range.start));
 						const end = visibleWidth(line.slice(0, range.end));
 						const last = fragment === wrapped.ranges.length - 1;
+						const next = visibleWidth(line.slice(0, wrapped.ranges[fragment + 1]?.start ?? line.length));
 						return spans?.flatMap((span) => {
 							if (span.columnStart === span.columnEnd) {
 								const anchor = last ? Math.min(span.columnStart, end) : span.columnStart;
 								if (anchor < start || anchor > end || (fragment > 0 && anchor === start && span.anchorBefore))
 									return [];
 								return [{ ...span, columnStart: anchor - start, columnEnd: anchor - start }];
+							}
+							// Recorded wrap gaps contain omitted whitespace. Keep only spans already
+							// declared as content, not unmarked continuation or quote padding.
+							if (span.columnStart >= end && span.columnEnd <= next) {
+								return [
+									{ ...span, columnStart: end - start, columnEnd: end - start, anchorBefore: end > start },
+								];
 							}
 							if (span.columnStart < start || span.columnEnd > end) return [];
 							return [{ ...span, columnStart: span.columnStart - start, columnEnd: span.columnEnd - start }];
