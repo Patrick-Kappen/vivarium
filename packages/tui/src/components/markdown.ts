@@ -1,8 +1,12 @@
 import { Marked, type Token, Tokenizer, type TokenizerExtension, type Tokens } from "marked";
 import { renderLatex } from "../latex.ts";
 import { MarkdownSelection } from "../markdown-selection.ts";
-import { composeVerticalSelection } from "../selection-compose.ts";
-import { type CopySource, joinSelectionMaps } from "../selection-map.ts";
+import {
+	composeHorizontalSelection,
+	composeVerticalSelection,
+	type VerticalSelectionPart,
+} from "../selection-compose.ts";
+import { type CopySource, getSelectionMap, joinSelectionMaps, setSelectionMap } from "../selection-map.ts";
 import { getCapabilities, hyperlink, isImageLine } from "../terminal-image.ts";
 import type { Component } from "../tui.ts";
 import { applyBackgroundToLine, visibleWidth, wrapTextWithAnsi } from "../utils.ts";
@@ -574,8 +578,9 @@ export class Markdown implements Component {
 			}
 
 			case "table": {
-				const tableLines = this.renderTable(token as Tokens.Table, width, nextTokenType, styleContext);
+				const tableLines = this.renderTable(token as Tokens.Table, width, nextTokenType, styleContext, selection);
 				lines.push(...tableLines);
+				if (selection) joinSelectionMaps(lines, [tableLines]);
 				break;
 			}
 
@@ -901,13 +906,18 @@ export class Markdown implements Component {
 	 * Delegates to wrapTextWithAnsi() so ANSI codes + long tokens are handled
 	 * consistently with the rest of the renderer.
 	 */
-	private wrapCellText(text: string, maxWidth: number, stylePrefix = ""): string[] {
-		const lines = wrapTextWithAnsi(text, Math.max(1, maxWidth));
-		return lines.map((line, index) => {
+	private wrapCellText(text: string, maxWidth: number, stylePrefix = "", selection?: MarkdownSelection): string[] {
+		const input = [text];
+		selection?.text(input, 0);
+		const width = Math.max(1, maxWidth);
+		const lines = selection?.wrap([input], width, { wrapImages: true }) ?? wrapTextWithAnsi(text, width);
+		const result = lines.map((line, index) => {
 			// Reset text styles after each non-final fragment, then restore the surrounding style before padding and borders.
 			const styleReset = index < lines.length - 1 ? "\x1b[22;23;24;25;27;28;29;39m" : "";
 			return `${line}${styleReset}${stylePrefix}`;
 		});
+		if (selection) composeVerticalSelection(result, [{ lines, row: 0, column: 0, width }]);
+		return result;
 	}
 
 	/**
@@ -919,6 +929,7 @@ export class Markdown implements Component {
 		availableWidth: number,
 		nextTokenType?: string,
 		styleContext?: InlineStyleContext,
+		selection?: MarkdownSelection,
 	): string[] {
 		const lines: string[] = [];
 		const numCols = token.header.length;
@@ -933,6 +944,16 @@ export class Markdown implements Component {
 		const availableForCells = availableWidth - borderOverhead;
 		if (availableForCells < numCols) {
 			// Too narrow to render a stable table. Fall back to raw markdown.
+			if (selection && token.raw) {
+				const raw = [token.raw];
+				selection.text(raw, 0);
+				const spacing: string[] = [];
+				if (nextTokenType && nextTokenType !== "space") {
+					spacing.push("");
+					selection.decoration(spacing, 0);
+				}
+				return selection.wrap([raw, spacing], availableWidth, { wrapImages: true });
+			}
 			const fallbackLines = token.raw ? wrapTextWithAnsi(token.raw, availableWidth) : [];
 			if (nextTokenType && nextTokenType !== "space") {
 				fallbackLines.push("");
@@ -1031,6 +1052,18 @@ export class Markdown implements Component {
 			}
 		}
 
+		const parts: VerticalSelectionPart[] = [];
+		const recordCells = (content: string[][], painted: string[][], row: number) => {
+			if (!selection) return;
+			let column = 2;
+			for (const [index, cell] of content.entries()) {
+				const width = columnWidths[index];
+				composeVerticalSelection(painted[index], [{ lines: cell, row: 0, column: 0, width }]);
+				parts.push({ lines: painted[index], row, column, width });
+				column += width + 3;
+			}
+		};
+
 		// Render top border
 		const topBorderCells = columnWidths.map((w) => "─".repeat(w));
 		lines.push(`┌─${topBorderCells.join("─┬─")}─┐`);
@@ -1038,18 +1071,23 @@ export class Markdown implements Component {
 		// Render header with wrapping
 		const headerCellLines: string[][] = token.header.map((cell, i) => {
 			const text = this.renderInlineTokens(cell.tokens || [], styleContext);
-			return this.wrapCellText(text, columnWidths[i], styleContext?.stylePrefix);
+			return this.wrapCellText(text, columnWidths[i], styleContext?.stylePrefix, selection);
 		});
 		const headerLineCount = Math.max(...headerCellLines.map((c) => c.length));
+		const headerPainted: string[][] = headerCellLines.map(() => []);
 
 		for (let lineIdx = 0; lineIdx < headerLineCount; lineIdx++) {
 			const rowParts = headerCellLines.map((cellLines, colIdx) => {
 				const text = cellLines[lineIdx] || "";
 				const padded = text + " ".repeat(Math.max(0, columnWidths[colIdx] - visibleWidth(text)));
-				return this.theme.bold(padded);
+				const styled = this.theme.bold(padded);
+				headerPainted[colIdx].push(styled);
+				return styled;
 			});
 			lines.push(`│ ${rowParts.join(" │ ")} │`);
 		}
+
+		recordCells(headerCellLines, headerPainted, 1);
 
 		// Render separator
 		const separatorCells = columnWidths.map((w) => "─".repeat(w));
@@ -1061,18 +1099,23 @@ export class Markdown implements Component {
 			const row = token.rows[rowIndex];
 			const rowCellLines: string[][] = row.map((cell, i) => {
 				const text = this.renderInlineTokens(cell.tokens || [], styleContext);
-				return this.wrapCellText(text, columnWidths[i], styleContext?.stylePrefix);
+				return this.wrapCellText(text, columnWidths[i], styleContext?.stylePrefix, selection);
 			});
 			const rowLineCount = Math.max(...rowCellLines.map((c) => c.length));
+			const painted: string[][] = rowCellLines.map(() => []);
+			const rowStart = lines.length;
 
 			for (let lineIdx = 0; lineIdx < rowLineCount; lineIdx++) {
 				const rowParts = rowCellLines.map((cellLines, colIdx) => {
 					const text = cellLines[lineIdx] || "";
-					return text + " ".repeat(Math.max(0, columnWidths[colIdx] - visibleWidth(text)));
+					const padded = text + " ".repeat(Math.max(0, columnWidths[colIdx] - visibleWidth(text)));
+					painted[colIdx].push(padded);
+					return padded;
 				});
 				lines.push(`│ ${rowParts.join(" │ ")} │`);
 			}
 
+			recordCells(rowCellLines, painted, rowStart);
 			if (rowIndex < token.rows.length - 1) {
 				lines.push(separatorLine);
 			}
@@ -1084,6 +1127,15 @@ export class Markdown implements Component {
 
 		if (nextTokenType && nextTokenType !== "space") {
 			lines.push(""); // Add spacing after table
+		}
+		if (selection) {
+			const mapped = [...lines];
+			composeHorizontalSelection(mapped, parts, availableWidth);
+			setSelectionMap(lines, () => {
+				// Rewriting header styles may move later columns; never attach old geometry to them.
+				if (parts.some((part) => part.lines.some((line) => visibleWidth(line) !== part.width))) return undefined;
+				return getSelectionMap(mapped);
+			});
 		}
 		return lines;
 	}
