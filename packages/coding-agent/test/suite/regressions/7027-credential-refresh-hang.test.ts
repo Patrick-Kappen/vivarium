@@ -142,10 +142,12 @@ describe("post-login model discovery", () => {
 		const currentModel = vi.spyOn(session, "model", "get").mockReturnValue(unknownModel);
 		const availableModels = vi.spyOn(session.modelRuntime, "getAvailableSnapshot").mockReturnValue([]);
 		let finishRefresh = () => {};
+		let rejectRefresh = (_error: Error) => {};
 		vi.spyOn(session.modelRuntime, "refresh").mockImplementation(
 			(options) =>
-				new Promise((resolve) => {
+				new Promise((resolve, reject) => {
 					finishRefresh = () => resolve({ aborted: false, errors: new Map() });
+					rejectRefresh = reject;
 					options?.signal?.addEventListener("abort", () => resolve({ aborted: true, errors: new Map() }), {
 						once: true,
 					});
@@ -171,8 +173,14 @@ describe("post-login model discovery", () => {
 
 		return {
 			...context,
+			context,
 			setModel,
 			currentModel,
+			async fail(ids: string[] = []) {
+				availableModels.mockReturnValue(ids.map((id) => ({ ...model, provider: "radius", id })));
+				rejectRefresh(new Error("config load failed"));
+				await vi.advanceTimersByTimeAsync(0);
+			},
 			async discover(ids: string[]) {
 				availableModels.mockReturnValue(ids.map((id) => ({ ...model, provider: "radius", id })));
 				finishRefresh();
@@ -207,6 +215,49 @@ describe("post-login model discovery", () => {
 		await login.discover(["fast", "balanced"]);
 		expect(login.setModel).not.toHaveBeenCalled();
 		expect(login.showError).not.toHaveBeenCalled();
+	});
+
+	// PR #16: rejection must finish deferred login just like a refresh result.
+	it("selects cached models after refresh rejects", async () => {
+		const login = await startLogin();
+		await login.fail(["balanced"]);
+		expect(login.showWarning).toHaveBeenCalledWith(expect.stringContaining("config load failed"));
+		expect(login.setModel).toHaveBeenCalledExactlyOnceWith(
+			expect.objectContaining({ provider: "radius", id: "balanced" }),
+			{ persist: true },
+		);
+		expect(login.showStatus).toHaveBeenLastCalledWith(expect.stringContaining("Selected balanced"));
+		expect(login.showError).not.toHaveBeenCalled();
+		expect(vi.getTimerCount()).toBe(0);
+	});
+
+	it("reports an empty catalog after refresh rejects", async () => {
+		const login = await startLogin();
+		await login.fail();
+		expect(login.showError).toHaveBeenCalledWith(expect.stringContaining("no models are available"));
+		expect(login.showStatus).toHaveBeenLastCalledWith(expect.not.stringContaining("Refreshing model catalog"));
+		expect(login.setModel).not.toHaveBeenCalled();
+	});
+
+	it("preserves a model selected before refresh rejects", async () => {
+		const login = await startLogin();
+		login.currentModel.mockReturnValue(harness!.getModel());
+		await login.fail(["balanced"]);
+		expect(login.setModel).not.toHaveBeenCalled();
+		expect(login.showError).not.toHaveBeenCalled();
+	});
+
+	it("preserves a session selected before refresh rejects", async () => {
+		const login = await startLogin();
+		const replacement = await createHarness();
+		try {
+			login.context.session = replacement.session;
+			await login.fail(["balanced"]);
+			expect(login.setModel).not.toHaveBeenCalled();
+			expect(login.showError).not.toHaveBeenCalled();
+		} finally {
+			replacement.cleanup();
+		}
 	});
 
 	it("bounds refresh to 15 seconds", async () => {

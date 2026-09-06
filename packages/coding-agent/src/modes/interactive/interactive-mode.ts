@@ -5751,12 +5751,19 @@ export class InteractiveMode {
 		const timeout = setTimeout(() => controller.abort(), 15_000);
 		void session.modelRuntime
 			.refresh({ providers: [providerId], signal: controller.signal })
-			.then(async (result) => {
+			.then((result) => {
 				if (result.aborted) {
 					this.showWarning(`${actionLabel}, but its model catalog refresh timed out; using cached models.`);
 				} else if (result.errors.size > 0) {
 					this.showWarning(`${actionLabel}, but its model catalog could not be refreshed; using cached models.`);
 				}
+			})
+			.catch((error: unknown) => {
+				this.showWarning(
+					`${actionLabel}, but its model catalog could not be refreshed: ${error instanceof Error ? error.message : String(error)}`,
+				);
+			})
+			.then(async () => {
 				// Do not replace a model or session selected while the refresh was running.
 				if (deferSelection && this.session === session && session.model === previousModel) {
 					await finishAuthentication();
@@ -5766,8 +5773,8 @@ export class InteractiveMode {
 				this.ui.requestRender();
 			})
 			.catch((error: unknown) => {
-				this.showWarning(
-					`${actionLabel}, but its model catalog could not be refreshed: ${error instanceof Error ? error.message : String(error)}`,
+				this.showError(
+					`${actionLabel}, but completing authentication failed: ${error instanceof Error ? error.message : String(error)}`,
 				);
 			})
 			.finally(() => clearTimeout(timeout));
