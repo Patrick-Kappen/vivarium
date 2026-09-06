@@ -9,8 +9,8 @@ import { TuiAltScreen } from "../src/tui-alt-screen.ts";
 import { stripTerminalSequences, visibleWidth } from "../src/utils.ts";
 import { VirtualTerminal } from "./virtual-terminal.ts";
 
-// Characterization, not the fixed contract: replace the documented-loss assertions
-// with the acceptance cases below when selection metadata is implemented.
+// Text cases now assert corrected behavior. Documented losses remain legacy
+// characterization until Markdown and wrapper metadata are implemented.
 interface Point {
 	x: number;
 	y: number;
@@ -91,7 +91,7 @@ const markdownTheme: MarkdownTheme = {
 
 const longLine = "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda";
 
-describe("fullscreen copy baseline on Pi 0.85.1", () => {
+describe("fullscreen Text copy regressions and legacy baseline", () => {
 	for (const scroll of [false, true]) {
 		it(`preserves explicit newlines, blank lines and space indentation (scroll=${scroll})`, async () => {
 			const source = "function example() {\n\n  return 42;\n}";
@@ -101,10 +101,9 @@ describe("fullscreen copy baseline on Pi 0.85.1", () => {
 			);
 		});
 
-		it(`documents visual wrapping becoming clipboard newlines (scroll=${scroll})`, async () => {
+		it(`copies a soft-wrapped logical line without an added newline (scroll=${scroll})`, async () => {
 			const copied = await copySelection(new Text(longLine, 0, 0), 32, { x: 0, y: 0 }, { x: 31, y: 1 }, { scroll });
-			assert.equal(copied, "alpha beta gamma delta epsilon\nzeta eta theta iota kappa lambda");
-			assert.notEqual(copied, longLine);
+			assert.equal(copied, longLine);
 		});
 	}
 
@@ -132,10 +131,10 @@ describe("fullscreen copy baseline on Pi 0.85.1", () => {
 		assert.equal(await copySelection(box, 32, { x: 2, y: 1 }, { x: 5, y: 3 }), "first\n    middle\n  last");
 	});
 
-	it("documents expanded tabs and lost source trailing spaces", async () => {
+	it("preserves source tabs and trailing spaces", async () => {
 		assert.equal(
 			await copySelection(new Text("one  \n\ttwo", 0, 0), 32, { x: 0, y: 0 }, { x: 5, y: 1 }),
-			"one\n   two",
+			"one  \n\ttwo",
 		);
 	});
 
@@ -166,7 +165,7 @@ describe("fullscreen copy baseline on Pi 0.85.1", () => {
 		);
 	});
 
-	it("documents the same soft-wrap loss after resizing before selection", async () => {
+	it("copies the logical line after resizing before selection", async () => {
 		assert.equal(
 			await copySelection(
 				new Text(longLine, 0, 0),
@@ -175,7 +174,7 @@ describe("fullscreen copy baseline on Pi 0.85.1", () => {
 				{ x: 31, y: 1 },
 				{ resizeFrom: 80, scroll: true },
 			),
-			"alpha beta gamma delta epsilon\nzeta eta theta iota kappa lambda",
+			longLine,
 		);
 	});
 
@@ -194,11 +193,11 @@ describe("fullscreen copy baseline on Pi 0.85.1", () => {
 	});
 });
 
-describe("selection-copy acceptance targets (not implemented)", () => {
+describe("remaining cross-renderer selection-copy acceptance targets", () => {
 	it.todo("omits decorative spans and rows while retaining literal identical characters in content");
-	it.todo("restores logical line boundaries and exact wrap whitespace for partial and full selections");
-	it.todo("excludes layout padding while preserving source indentation, tabs and trailing spaces");
+	it.todo("extends logical-line and exact wrap-whitespace copying from Text to Markdown and wrappers");
+	it.todo("extends Text padding exclusion to layout and decorator padding without changing source whitespace");
 	it.todo("copies across message boundaries without headers or hidden thinking content");
-	it.todo("keeps selection and copied text consistent during streaming, reflow and scrolling");
+	it.todo("extends Text selection lifecycle coverage to streaming message and Markdown integration");
 	it.todo("composes maps through Container, Box, stacks, ScrollView and extension wrappers");
 });

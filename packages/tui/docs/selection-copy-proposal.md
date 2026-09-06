@@ -1,7 +1,8 @@
 # Source-aware fullscreen selection (proposal)
 
-Status: design plus internal wrapping prototype. No public selection API or
-clipboard behavior change yet.
+Status: draft internal Text/fullscreen integration. Text copying now uses source
+metadata; Markdown and general wrapper integration remain unfinished. No public
+selection API is exported.
 Baseline: Vivarium `d0e76d057` (merged Pi 0.85.1 synchronization).
 
 ## Implementation progress
@@ -12,11 +13,34 @@ string-array facade does not allocate range arrays. Offsets exclude synthetic
 style carry/reset sequences and point into the unchanged input, so gaps retain
 omitted wrap whitespace and real newline sequences without reconstruction.
 
-This is not yet a terminal-cell selection map. In particular, Text's tab
-expansion still needs a mapping back to the original tab; trimmed source tails
-need explicit endpoint semantics. Text, layout and fullscreen selection are not
-yet connected to this primitive. The initial copy-loss baseline remains expected
-to pass until that connection changes clipboard behavior.
+Text now binds a lazy cell/source map to each exact rendered string-array snapshot.
+Wrapping offsets are recorded during rendering; cell maps are built only when
+queried, from that snapshot's original text, not current mutable component state.
+Expanded tab cells map to the original tab. Text padding has empty metadata;
+real blank lines have zero-cell source anchors. Reaching the final visible content
+boundary includes source trailing whitespace removed by wrapping, even when no
+cells remain for it. Selecting padding beyond that anchor does not select text.
+
+Plain Container forwards child snapshots without requiring a second render method
+that could accidentally bypass a subclass's overridden render(). ScrollView copying
+uses the existing unscrolled content snapshot. The non-scroll viewport projects
+full-width leaf metadata and vertical clipping; horizontal/clipped composition
+still falls back. Both clipboard extraction and highlighting use mapped spans.
+Legacy rows in mixed selections retain their existing behavior. Independent copy
+blocks currently receive one separating newline in addition to their source text;
+full boundary composition is still pending.
+
+Selections are cleared on width changes, changes to selected source mappings,
+removal of the selected scroll view or appearance/disappearance of an overlay.
+Scrolling and unrelated appends preserve unchanged selected blocks. Mutated legacy
+render arrays, text-rewriting background callbacks and glyphs too wide for the
+viewport fall back rather than receiving guessed mappings. This is an internal
+prototype fallback, not the final validation policy for a public metadata API.
+
+`../test/text-selection.test.ts` adds 28 end-to-end/snapshot tests. The earlier
+Text copy-loss cases now assert corrected output; Box, Markdown and unmanaged
+decorator losses remain explicit characterization tests. No real editor paste or
+terminal-native selection guarantee is claimed yet.
 
 Tests in `../test/wrap-source-ranges.test.ts` cover exact source offsets, explicit
 newlines/blank lines, omitted wrap spaces, styling, tabs before expansion and
@@ -57,10 +81,10 @@ engine or activates itself implicitly.
 
 ## Problem and measured baseline
 
-`TuiAltScreen.getActiveSelectionText()` slices rendered terminal rows, strips
-terminal sequences, trims each row's end and joins rows with `\n`. Its sources
-are `previousScreen` or `LayoutBox.scrollContentLines`, not logical text.
-Clipboard transport improvements do not change this input.
+On the original baseline, `TuiAltScreen.getActiveSelectionText()` sliced rendered
+terminal rows, stripped terminal sequences, trimmed each row's end and joined
+rows with `\n`. That remains the fallback for unmapped content. Clipboard transport
+improvements alone do not change this input.
 
 For example, a single logical line renders at width 32 as:
 
@@ -69,7 +93,7 @@ alpha beta gamma delta epsilon
 zeta eta theta iota kappa lambda
 ```
 
-Both ordinary fullscreen and ScrollView selection copy this visual newline.
+On the original baseline, both fullscreen selection paths copied this visual newline.
 A frame also inserts borders into multiline selection, even when both mouse
 endpoints are inside the body. Removing borders alone does not solve wrapping.
 
@@ -77,9 +101,9 @@ endpoints are inside the body. Removing borders alone does not solve wrapping.
 `TuiAltScreen` and captures its injected clipboard callback. Thirteen baseline
 cases cover explicit and blank lines, indentation, wrapping, generic decoration,
 Box padding, tabs, trailing spaces, Markdown code and prose, graphemes, resizing
-before selection and scrolled content coordinates. These characterize CURRENT
-behavior, including bugs; six TODO acceptance targets explicitly remain unfixed.
-Replace bug-characterization assertions with desired outputs during implementation.
+before selection and scrolled content coordinates. Text cases now assert desired
+behavior; remaining losses characterize unmapped components. Six TODO targets
+track the broader cross-renderer integration, not missing Text-only tests.
 No system clipboard or model endpoint is used by these tests.
 
 ## Required behavior
@@ -106,9 +130,16 @@ No system clipboard or model endpoint is used by these tests.
 
 ## Proposed rendering contract
 
-Introduce an optional `Component.renderWithMetadata(width)` and a shared engine
-render helper. The helper calls either that method OR legacy `render(width)`,
-never both to obtain one result. Existing `render(width): string[]` stays usable.
+The initial proposal considered `Component.renderWithMetadata(width)`. The Text
+prototype instead keeps `render(width): string[]` unchanged and uses an internal
+WeakMap keyed by the exact returned array. This avoids inherited metadata methods
+bypassing an overridden render() in legacy wrappers. A changed array is not a
+valid mapped snapshot. Container forwards metadata only for its own concatenation;
+wrappers that produce new arrays must explicitly forward maps in a later step.
+
+The public helper/API shape remains under review until composition is complete.
+The types below describe the intended information, not the current internal
+storage format. Rendering must remain single-pass and snapshot-coherent.
 
 Illustrative types, not an exported API yet:
 
@@ -169,8 +200,8 @@ through the logical source interval.
 Independent documents need an explicit composition boundary, not a heuristic
 based on their visual spacing. Proposed defaults: one newline between vertically
 stacked copy blocks; no newline for wrapper decoration. The implementation must
-add boundary records/helpers alongside the row map before supporting mixed
-blocks. Horizontal stacks and Markdown tables need an explicit reading order
+extend the prototype's vertical child-boundary markers into a complete separator
+contract before supporting arbitrary mixed layouts. Horizontal stacks and Markdown tables need an explicit reading order
 and separator policy (for example a tab between cells), or legacy fallback for
 that entire region until specified. The illustrative types above intentionally
 do not claim to settle these composition boundaries.
@@ -220,7 +251,9 @@ reflow invalidates its mapping. Do not reinterpret old screen coordinates agains
 new text. Unrelated message appends and scrolling should retain selections of
 unchanged documents. Source-anchored selection surviving arbitrary reflow is an
 optional later enhancement, not a reason to copy the wrong text in version one.
-This policy still needs acceptance coverage during active streaming and resize.
+Text acceptance coverage now exercises changed selected content, unrelated streaming
+appends, scroll drags, removed scroll views and resize. Message/Markdown integration
+still needs equivalent coverage.
 
 Drag, reverse drag, word/line selection, keyboard copy and selection highlighting
 must use the same boundary resolution. A decoration-only selection yields no
@@ -248,7 +281,7 @@ must also handle explicit trailing newlines without duplicating separators.
 
 No acceptance claim should be based solely on the green characterization suite.
 The TODO targets become executable passing tests as the corresponding behavior
-is implemented. This baseline and wrapping primitive are submitted as a draft
-engine PR, not a completed clipboard fix. Validation passes with `npm run check`
+is implemented. This Text integration is submitted on the same draft engine PR,
+not as a completed message/Markdown clipboard fix. Validation passes with `npm run check`
 and the full isolated `./test.sh` after `npm run build:offline`. No resource,
 consumer pin update or deployment is included.

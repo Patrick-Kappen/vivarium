@@ -1,5 +1,6 @@
+import { setSelectionMap, textSelectionMap } from "../selection-map.ts";
 import type { Component } from "../tui.ts";
-import { applyBackgroundToLine, visibleWidth, wrapTextWithAnsi } from "../utils.ts";
+import { applyBackgroundToLine, stripTerminalSequences, visibleWidth, wrapTextWithAnsiRanges } from "../utils.ts";
 
 /**
  * Text component - displays multi-line text with word wrapping
@@ -65,7 +66,7 @@ export class Text implements Component {
 		const contentWidth = Math.max(1, width - paddingX * 2);
 
 		// Wrap text (this preserves ANSI codes but does NOT pad)
-		const wrappedLines = wrapTextWithAnsi(normalizedText, contentWidth);
+		const { lines: wrappedLines, ranges } = wrapTextWithAnsiRanges(normalizedText, contentWidth);
 
 		// Add margins and background to each line
 		const leftMargin = " ".repeat(paddingX);
@@ -96,6 +97,19 @@ export class Text implements Component {
 		}
 
 		const result = [...emptyLines, ...contentLines, ...emptyLines];
+		const sourceText = this.text;
+		const paddingY = this.paddingY;
+		const hasBackground = this.customBgFn !== undefined;
+		setSelectionMap(result, () => {
+			if (hasBackground) {
+				for (const [row, line] of wrappedLines.entries()) {
+					const expected = applyBackgroundToLine(leftMargin + line + rightMargin, width, (value) => value);
+					if (stripTerminalSequences(result[paddingY + row]!) !== stripTerminalSequences(expected))
+						return undefined;
+				}
+			}
+			return textSelectionMap(sourceText, normalizedText, ranges, paddingX, paddingY, contentWidth);
+		});
 
 		// Update cache
 		this.cachedText = this.text;

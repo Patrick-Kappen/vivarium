@@ -4,6 +4,7 @@
 
 import { performance } from "node:perf_hooks";
 import { isKeyRelease, matchesKey } from "./keys.ts";
+import { joinSelectionMaps } from "./selection-map.ts";
 import type { Terminal } from "./terminal.ts";
 import {
 	isOsc11BackgroundColorResponse,
@@ -366,14 +367,17 @@ export class Container implements Component {
 	render(width: number): string[] {
 		const lines: string[] = [];
 		const mouseChildren: Array<{ component: Component; height: number }> = [];
+		const renderedChildren: string[][] = [];
 		for (const child of this.children) {
 			const childLines = child.render(width);
+			renderedChildren.push(childLines);
 			mouseChildren.push({ component: child, height: childLines.length });
 			for (const line of childLines) {
 				lines.push(line);
 			}
 		}
 		this.mouseLayout = { width, children: mouseChildren };
+		joinSelectionMaps(lines, renderedChildren);
 		return lines;
 	}
 }
