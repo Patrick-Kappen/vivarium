@@ -1,8 +1,9 @@
 # Source-aware fullscreen selection (proposal)
 
 Status: draft internal Text and layout/fullscreen integration. Text, Box, VStack
-and HStack now forward source metadata; Markdown and extension integration remain
-unfinished. No public selection API is exported.
+and HStack forward source metadata. Basic Markdown emission is now mapped, but
+nested Markdown, lexer provenance and extension integration remain unfinished.
+No public selection API is exported.
 Baseline: Vivarium `d0e76d057` (merged Pi 0.85.1 synchronization).
 
 ## Implementation progress
@@ -81,14 +82,46 @@ prototype fallback, not the final validation policy for a public metadata API.
 `../test/text-selection.test.ts` contains 28 Text and 20 vertical-composition tests.
 `../test/horizontal-selection.test.ts` adds 38 horizontal, clipping and snapshot
 regressions. Both use the shared fullscreen SGR selection fixture.
-The earlier Text and Box copy-loss cases now assert corrected output; Markdown
-and unmanaged decorator losses remain explicit characterization tests. No real editor paste or
+The earlier Text, Box and standalone Markdown code-indent cases now assert corrected
+output; unmanaged decorator losses remain explicit characterization tests. No real editor paste or
 terminal-native selection guarantee is claimed yet.
 
 Tests in `../test/wrap-source-ranges.test.ts` cover exact source offsets, explicit
 newlines/blank lines, omitted wrap spaces, styling, tabs before expansion and
 wide/combining/emoji graphemes. Existing wrapping tests remain the independent
 render-output regression check.
+
+### Initial Markdown coverage
+
+`MarkdownSelection` records logical visible text at emission sites, before wrapping
+and margins. Paragraphs, inline formatting/links, headings and standalone code
+blocks now have source maps. Heading prefixes, code fences, code presentation
+indent and horizontal rules are explicitly decoration, not stripped heuristically
+at copy time. Literal identical characters inside code remain content.
+
+Code spans reference one token-text source across its real lines and soft wraps,
+including blank/space-only lines and trailing spaces. Styling-only highlighters
+inherit that source only after exact visible-text validation. Rewriting or
+reordering highlighters retain legacy body rows rather than copying hidden original
+code. Transformers still run before parsing at the original content width, and
+copy uses their visible output. Link URLs hidden in OSC 8 are not copied.
+
+Unchanged logical sources survive incidental measurement renders and unrelated
+paragraph appends. A streamed partial closing fence remains excluded when the
+closing fence completes. Old rendered snapshots do not read later Markdown state.
+Zero-cell blank anchors outside a clipped pane cannot select the neighbouring pane.
+
+This is deliberately incomplete: lists, blockquotes (including nested code),
+tables and block math still have legacy content rows. Inputs containing tabs or
+CR currently keep the whole Markdown component unmapped because preprocessing and
+lexer normalization do not yet carry their original offsets. LF code token text
+is supported; this is not an original-Markdown-byte preservation guarantee.
+Multiple source blank lines collapsed by the renderer are not reconstructed.
+The existing general separator/occlusion and public API limitations still apply.
+
+`../test/markdown-selection.test.ts` adds 22 focused regressions. Existing Markdown
+render tests remain the independent check that presentation is unchanged. All of
+the remaining cases must be addressed before claiming complete message copying.
 
 ## Scope and ownership
 

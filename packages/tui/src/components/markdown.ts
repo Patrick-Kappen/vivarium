@@ -1,5 +1,8 @@
 import { Marked, type Token, Tokenizer, type TokenizerExtension, type Tokens } from "marked";
 import { renderLatex } from "../latex.ts";
+import { MarkdownSelection } from "../markdown-selection.ts";
+import { composeVerticalSelection } from "../selection-compose.ts";
+import type { CopySource } from "../selection-map.ts";
 import { getCapabilities, hyperlink, isImageLine } from "../terminal-image.ts";
 import type { Component } from "../tui.ts";
 import { applyBackgroundToLine, visibleWidth, wrapTextWithAnsi } from "../utils.ts";
@@ -246,6 +249,7 @@ export class Markdown implements Component {
 	private cachedText?: string;
 	private cachedWidth?: number;
 	private cachedLines?: string[];
+	private copySources: readonly CopySource[] = [];
 
 	constructor(
 		text: string,
@@ -287,6 +291,7 @@ export class Markdown implements Component {
 		// Don't render anything if there's no actual text
 		if (!text || text.trim() === "") {
 			const result: string[] = [];
+			this.copySources = [];
 			// Update cache
 			this.cachedText = this.text;
 			this.cachedWidth = width;
@@ -303,19 +308,24 @@ export class Markdown implements Component {
 
 		// Convert tokens to styled terminal output
 		const renderedLines: string[] = [];
+		const blocks: string[][] = [];
+		// Lexer normalization currently loses tab/CR provenance. Keep those inputs
+		// explicitly unmapped until the original lexer offsets are carried through.
+		const selection = /[\t\r]/.test(text) ? undefined : new MarkdownSelection(this.copySources);
 
 		for (let i = 0; i < tokens.length; i++) {
 			const token = tokens[i];
 			const nextToken = tokens[i + 1];
-			const tokenLines = this.renderToken(token, contentWidth, nextToken?.type);
+			const tokenLines = this.renderToken(token, contentWidth, nextToken?.type, undefined, selection);
+			blocks.push(tokenLines);
 			for (const tokenLine of tokenLines) {
 				renderedLines.push(tokenLine);
 			}
 		}
 
 		// Wrap lines (NO padding, NO background yet)
-		const wrappedLines: string[] = [];
-		for (const line of renderedLines) {
+		const wrappedLines: string[] = selection?.wrap(blocks, contentWidth) ?? [];
+		for (const line of selection ? [] : renderedLines) {
 			if (isImageLine(line)) {
 				wrappedLines.push(line);
 			} else {
@@ -359,6 +369,11 @@ export class Markdown implements Component {
 
 		// Combine top padding, content, and bottom padding
 		const result = emptyLines.concat(contentLines, emptyLines);
+		if (selection)
+			composeVerticalSelection(result, [
+				{ lines: wrappedLines, row: this.paddingY, column: this.paddingX, width: contentWidth },
+			]);
+		this.copySources = selection?.sources ?? [];
 
 		// Update cache
 		this.cachedText = this.text;
@@ -456,6 +471,7 @@ export class Markdown implements Component {
 		width: number,
 		nextTokenType?: string,
 		styleContext?: InlineStyleContext,
+		selection?: MarkdownSelection,
 	): string[] {
 		const lines: string[] = [];
 
@@ -482,8 +498,10 @@ export class Markdown implements Component {
 				const headingText = this.renderInlineTokens(token.tokens || [], headingStyleContext);
 				const styledHeading = headingLevel >= 3 ? headingStyleFn(headingPrefix) + headingText : headingText;
 				lines.push(styledHeading);
+				selection?.text(lines, 0, headingLevel >= 3 ? headingPrefix : "");
 				if (nextTokenType && nextTokenType !== "space") {
 					lines.push(""); // Add spacing after headings (unless space token follows)
+					selection?.decoration(lines, lines.length - 1);
 				}
 				break;
 			}
@@ -491,15 +509,18 @@ export class Markdown implements Component {
 			case "paragraph": {
 				const paragraphText = this.renderInlineTokens(token.tokens || [], styleContext);
 				lines.push(paragraphText);
+				selection?.text(lines, 0);
 				// Don't add spacing if next token is space or list
 				if (nextTokenType && nextTokenType !== "list" && nextTokenType !== "space") {
 					lines.push("");
+					selection?.decoration(lines, lines.length - 1);
 				}
 				break;
 			}
 
 			case "text":
 				lines.push(this.renderInlineTokens([token], styleContext));
+				selection?.text(lines, 0);
 				break;
 
 			case "latexBlock": {
@@ -533,8 +554,10 @@ export class Markdown implements Component {
 					}
 				}
 				lines.push(this.theme.codeBlockBorder("```"));
+				selection?.code(lines, token.text, indent);
 				if (nextTokenType && nextTokenType !== "space") {
 					lines.push(""); // Add spacing after code blocks (unless space token follows)
+					selection?.decoration(lines, lines.length - 1);
 				}
 				break;
 			}
@@ -604,8 +627,10 @@ export class Markdown implements Component {
 
 			case "hr":
 				lines.push(this.theme.hr("─".repeat(Math.min(width, 80))));
+				selection?.decoration(lines, 0);
 				if (nextTokenType && nextTokenType !== "space") {
 					lines.push(""); // Add spacing after horizontal rules (unless space token follows)
+					selection?.decoration(lines, lines.length - 1);
 				}
 				break;
 
@@ -613,12 +638,14 @@ export class Markdown implements Component {
 				// Render HTML as plain text (escaped for terminal)
 				if ("raw" in token && typeof token.raw === "string") {
 					lines.push(this.applyDefaultStyle(token.raw.trim()));
+					selection?.text(lines, 0);
 				}
 				break;
 
 			case "space":
 				// Space tokens represent blank lines in markdown
 				lines.push("");
+				selection?.text(lines, 0);
 				break;
 
 			default:

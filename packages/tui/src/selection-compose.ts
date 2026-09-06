@@ -77,7 +77,8 @@ export function projectSelectionPart(rows: CopySpan[][], part: SelectionProjecti
 			const columnStart = part.column + span.columnStart;
 			const columnEnd = part.column + span.columnEnd;
 			const partialCells = span.splittable && columnEnd > left && columnStart < right;
-			if ((columnStart < left || columnEnd > right) && !partialCells) {
+			const outsideAnchor = columnStart === columnEnd && columnStart === right && !span.anchorBefore;
+			if (((columnStart < left || columnEnd > right) && !partialCells) || outsideAnchor) {
 				let flows = interrupted.get(span.source);
 				if (!flows) {
 					flows = new Set();

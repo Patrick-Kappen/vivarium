@@ -9,8 +9,8 @@ import { TuiAltScreen } from "../src/tui-alt-screen.ts";
 import { stripTerminalSequences, visibleWidth } from "../src/utils.ts";
 import { VirtualTerminal } from "./virtual-terminal.ts";
 
-// Text and Box cases assert corrected behavior. Remaining documented losses
-// characterize Markdown and decorators that do not yet forward metadata.
+// Mapped Text, layout and basic Markdown cases assert corrected behavior.
+// Remaining documented losses characterize decorators without metadata.
 interface Point {
 	x: number;
 	y: number;
@@ -138,7 +138,7 @@ describe("fullscreen Text copy regressions and legacy baseline", () => {
 		);
 	});
 
-	it("documents Markdown code-block presentation indent being copied", async () => {
+	it("excludes Markdown code-block presentation indent", async () => {
 		const component = new Markdown("```js\nfunction f() {\n  return 42;\n}\n```", 0, 0, markdownTheme);
 		const lines = component.render(40).map(stripTerminalSequences);
 		const first = lines.findIndex((line) => line.includes("function f()"));
@@ -150,7 +150,7 @@ describe("fullscreen Text copy regressions and legacy baseline", () => {
 			{ x: 2, y: first },
 			{ x: visibleWidth(lines[last]!.trimEnd()) - 1, y: last },
 		);
-		assert.equal(copied, "function f() {\n    return 42;\n  }");
+		assert.equal(copied, "function f() {\n  return 42;\n}");
 	});
 
 	it("copies rendered prose rather than hidden Markdown syntax", async () => {
