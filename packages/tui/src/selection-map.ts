@@ -14,7 +14,15 @@ export interface CopySource {
 	readonly legacy?: boolean;
 }
 
+export interface CopyOrder {
+	readonly group: CopySource;
+	readonly column: number;
+	readonly occurrence?: string;
+}
+
 export interface CopySpan {
+	/** Explicit logical column order within one contiguous selected group. */
+	readonly readingOrder?: CopyOrder;
 	/** Begin a separate copy run, including repeated sources and clipping boundaries. */
 	readonly breakBefore?: boolean;
 	/** Stable layout lane; distinct horizontal occurrences never share a copy run. */
@@ -105,12 +113,22 @@ export function joinSelectionMaps(lines: string[], children: readonly string[][]
 	setSelectionMap(lines, () => {
 		const rows: (readonly CopySpan[] | undefined)[] = [];
 		let mapped = false;
-		for (const child of children) {
+		for (const [index, child] of children.entries()) {
 			const map = getSelectionMap(child);
 			mapped ||= map !== undefined;
 			let firstContent = true;
 			for (let row = 0; row < child.length; row++) {
-				const spans = map?.[row];
+				const spans = map?.[row]?.map((span) =>
+					span.readingOrder
+						? {
+								...span,
+								readingOrder: {
+									...span.readingOrder,
+									occurrence: `v${index}/${span.readingOrder.occurrence ?? ""}`,
+								},
+							}
+						: span,
+				);
 				if (firstContent && spans?.length) {
 					rows.push([{ ...spans[0]!, breakBefore: true }, ...spans.slice(1)]);
 					firstContent = false;
@@ -149,17 +167,68 @@ export function selectionText(
 	const chunks: Array<{
 		source?: CopySource;
 		flow?: string;
+		readingOrder?: CopyOrder;
 		row: number;
 		separator: string;
 		start: number;
 		end: number;
 		text?: string;
 	}> = [];
+	const sameGroup = (a: CopyOrder | undefined, b: CopyOrder | undefined) =>
+		a !== undefined && b !== undefined && a.group === b.group && a.occurrence === b.occurrence;
+	const append = (span: CopySpan, row: number, boundaryRow = row) => {
+		const previous = chunks[chunks.length - 1];
+		if (
+			!span.breakBefore &&
+			previous?.source === span.source &&
+			previous.flow === span.flow &&
+			((!previous.readingOrder && !span.readingOrder) ||
+				(sameGroup(previous.readingOrder, span.readingOrder) &&
+					previous.readingOrder?.column === span.readingOrder?.column)) &&
+			span.start >= previous.start
+		) {
+			previous.end = Math.max(previous.end, span.end);
+			previous.row = row;
+			previous.readingOrder = span.readingOrder;
+		} else {
+			const adjacentColumn =
+				sameGroup(previous?.readingOrder, span.readingOrder) &&
+				previous?.readingOrder?.column !== span.readingOrder?.column;
+			const separator = !previous
+				? ""
+				: adjacentColumn || (previous.row === boundaryRow && previous.flow !== span.flow)
+					? "\t"
+					: "\n";
+			chunks.push({
+				source: span.source,
+				flow: span.flow,
+				readingOrder: span.readingOrder,
+				row,
+				separator,
+				start: span.start,
+				end: span.end,
+			});
+		}
+	};
+	let pending: Array<{ span: CopySpan; row: number }> = [];
+	const interrupted = new Map<CopySource, Set<string | undefined>>();
+	const flush = () => {
+		if (pending.length === 0) return;
+		const firstScreenRow = pending[0]!.row;
+		const lastScreenRow = pending[pending.length - 1]!.row;
+		// Sort only selected fragments, and never across an unrelated component or legacy row.
+		pending.sort((a, b) => a.span.readingOrder!.column - b.span.readingOrder!.column);
+		for (const [index, { span, row }] of pending.entries()) append(span, row, index === 0 ? firstScreenRow : row);
+		// A short last column must not change the boundary to neighbouring screen content.
+		chunks[chunks.length - 1]!.row = lastScreenRow;
+		pending = [];
+	};
 	for (let row = firstRow; row <= lastRow; row++) {
 		const line = lines[row] ?? "";
 		const range = columns(line, row);
 		const spans = map?.[row];
 		if (spans === undefined) {
+			flush();
 			chunks.push({
 				row,
 				separator: chunks.length ? "\n" : "",
@@ -171,22 +240,27 @@ export function selectionText(
 			});
 			continue;
 		}
-		for (const span of selectedCopySpans(spans, range.start, range.end, 0, maxColumn)) {
-			const previous = chunks[chunks.length - 1];
-			if (
-				!span.breakBefore &&
-				previous?.source === span.source &&
-				previous.flow === span.flow &&
-				span.start >= previous.start
-			) {
-				previous.end = Math.max(previous.end, span.end);
-				previous.row = row;
-			} else {
-				const separator = !previous ? "" : previous.row === row && previous.flow !== span.flow ? "\t" : "\n";
-				chunks.push({ source: span.source, flow: span.flow, row, separator, start: span.start, end: span.end });
+		const selected = new Set(selectedCopySpans(spans, range.start, range.end, 0, maxColumn));
+		for (const original of spans) {
+			if (!selected.has(original)) {
+				if (original.readingOrder) {
+					let flows = interrupted.get(original.source);
+					if (!flows) {
+						flows = new Set();
+						interrupted.set(original.source, flows);
+					}
+					flows.add(original.flow);
+				}
+				continue;
 			}
+			const skipped = original.readingOrder && interrupted.get(original.source)?.delete(original.flow);
+			const span = skipped ? { ...original, breakBefore: true } : original;
+			if (pending.length && !sameGroup(pending[0]!.span.readingOrder, span.readingOrder)) flush();
+			if (span.readingOrder) pending.push({ span, row });
+			else append(span, row);
 		}
 	}
+	flush();
 	const text = chunks
 		.map((chunk) => {
 			const text = chunk.source ? chunk.source.text.slice(chunk.start, chunk.end) : chunk.text!;

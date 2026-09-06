@@ -2,7 +2,7 @@
 
 Status: draft internal Text and layout/fullscreen integration. Text, Box, VStack
 and HStack forward source metadata. Basic Markdown emission is now mapped, but
-logical table-row export, lexer provenance and extension integration remain unfinished.
+lexer provenance and extension integration remain unfinished.
 No public selection API is exported.
 Baseline: Vivarium `d0e76d057` (merged Pi 0.85.1 synchronization).
 
@@ -129,11 +129,19 @@ callbacks leave the table region legacy rather than using shifted source bounds.
 Very narrow tables still visibly render raw Markdown and copy that visible syntax
 without adding wrapping newlines. Nested list/quote wrappers forward table maps.
 
-Table composition currently follows the HStack screen-row policy: adjacent cells
-receive tabs, while an uninterrupted single cell joins its logical wraps. Thus
-wrapped `abcdef` and `uvwxyz` cells can copy `abc\tuvw\ndef\txyz`, not
-`abcdef\tuvwxyz`. Logical table-row export remains unfinished; this increment must
-not be advertised as complete structured table copy-paste.
+Mapped table rows explicitly declare a logical column order. Selected fragments
+of wrapped `abcdef` and `uvwxyz` cells now copy `abcdef\tuvwxyz`, rather than
+`abc\tuvw\ndef\txyz`. Partial selections reorder only selected fragments;
+clipped and skipped source spans remain discontinuities, not restored text.
+These internal reading-order groups are scoped through wrappers so repeated
+cached tables cannot merge. Changing reading order invalidates a selection even
+when the painted text is unchanged.
+
+Ordering does not cross unrelated selected content or legacy rows. The screen
+boundaries of each group remain authoritative for separators to neighbouring
+content; ordinary HStack behaviour is unchanged. Rows containing legacy cells
+retain screen order. This is plain-text selection, not CSV quoting or a separate
+whole-table export command.
 
 Display math copies its rendered Unicode rows and intrinsic alignment, without
 hidden LaTeX delimiters. Delimiters remain content when disabled or unsupported
@@ -144,8 +152,7 @@ paragraph or list-item appends. A streamed partial closing fence remains exclude
 closing fence completes. Old rendered snapshots do not read later Markdown state.
 Zero-cell blank anchors outside a clipped pane cannot select the neighbouring pane.
 
-This is deliberately incomplete: logical table-row export is not implemented,
-and unknown token output retains legacy content rows. Enclosing mapped lists and
+This is deliberately incomplete: unknown token output retains legacy content rows. Enclosing mapped lists and
 quotes exclude their own presentation without claiming unknown bodies are source-aware. Inputs containing tabs or CR
 currently keep the whole Markdown component unmapped because preprocessing and
 lexer normalization do not yet carry their original offsets. LF code token text
@@ -154,7 +161,8 @@ Multiple source blank lines collapsed by the renderer are not reconstructed.
 The existing general separator/occlusion and public API limitations still apply.
 
 `../test/markdown-selection.test.ts` contains 62 focused regressions;
-`../test/markdown-table-selection.test.ts` adds 23 table regressions. Existing Markdown
+`../test/markdown-table-selection.test.ts` contains 34 table regressions, and
+`../test/selection-reading-order.test.ts` adds four generic ordering regressions. Existing Markdown
 render tests remain the independent check that presentation is unchanged. All of
 the remaining cases must be addressed before claiming complete message copying.
 

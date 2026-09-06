@@ -1510,6 +1510,9 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 							!(span.source.legacy && other.source.legacy && span.source.text === other.source.text)) ||
 						span.breakBefore !== other.breakBefore ||
 						span.flow !== other.flow ||
+						span.readingOrder?.group !== other.readingOrder?.group ||
+						span.readingOrder?.column !== other.readingOrder?.column ||
+						span.readingOrder?.occurrence !== other.readingOrder?.occurrence ||
 						span.anchorBefore !== other.anchorBefore ||
 						span.splittable !== other.splittable ||
 						span.start !== other.start ||

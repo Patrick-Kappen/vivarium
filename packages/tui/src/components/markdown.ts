@@ -1053,15 +1053,19 @@ export class Markdown implements Component {
 		}
 
 		const parts: VerticalSelectionPart[] = [];
+		const groups: VerticalSelectionPart[][] = [];
 		const recordCells = (content: string[][], painted: string[][], row: number) => {
 			if (!selection) return;
 			let column = 2;
+			const cells: VerticalSelectionPart[] = [];
 			for (const [index, cell] of content.entries()) {
 				const width = columnWidths[index];
 				composeVerticalSelection(painted[index], [{ lines: cell, row: 0, column: 0, width }]);
-				parts.push({ lines: painted[index], row, column, width });
+				cells.push({ lines: painted[index], row, column, width });
 				column += width + 3;
 			}
+			parts.push(...cells);
+			groups.push(cells);
 		};
 
 		// Render top border
@@ -1129,11 +1133,18 @@ export class Markdown implements Component {
 			lines.push(""); // Add spacing after table
 		}
 		if (selection) {
-			const mapped = [...lines];
-			composeHorizontalSelection(mapped, parts, availableWidth);
 			setSelectionMap(lines, () => {
 				// Rewriting header styles may move later columns; never attach old geometry to them.
 				if (parts.some((part) => part.lines.some((line) => visibleWidth(line) !== part.width))) return undefined;
+				const ordered = groups.flatMap((cells) => {
+					const sources = cells.map(
+						(cell) => getSelectionMap(cell.lines)?.find((row) => row?.length)?.[0]?.source,
+					);
+					const group = sources.every((source) => source && !source.legacy) ? sources[0] : undefined;
+					return cells.map((cell, column) => ({ ...cell, readingOrder: group ? { group, column } : undefined }));
+				});
+				const mapped = [...lines];
+				composeHorizontalSelection(mapped, ordered, availableWidth);
 				return getSelectionMap(mapped);
 			});
 		}

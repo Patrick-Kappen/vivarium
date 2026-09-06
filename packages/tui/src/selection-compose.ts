@@ -1,5 +1,6 @@
 import type { LayoutRect } from "./layout.ts";
 import {
+	type CopyOrder,
 	type CopySource,
 	type CopySpan,
 	getSelectionMap,
@@ -10,6 +11,7 @@ import {
 import { stripTerminalSequences, visibleWidth } from "./utils.ts";
 
 export interface VerticalSelectionPart {
+	readonly readingOrder?: CopyOrder;
 	readonly lines: readonly string[];
 	readonly row: number;
 	readonly column: number;
@@ -21,7 +23,7 @@ export interface VerticalSelectionPart {
 export function composeVerticalSelection(lines: string[], parts: readonly VerticalSelectionPart[]): void {
 	setSelectionMap(lines, () => {
 		const rows: CopySpan[][] = Array.from({ length: lines.length }, () => []);
-		for (const part of parts) {
+		for (const [index, part] of parts.entries()) {
 			const map = getSelectionMap(part.lines);
 			let firstContent = true;
 			const height = Math.min(part.lines.length, part.height ?? part.lines.length, lines.length - part.row);
@@ -41,6 +43,11 @@ export function composeVerticalSelection(lines: string[], parts: readonly Vertic
 					if (span.columnStart < 0 || span.columnEnd > part.width) return undefined;
 					rows[part.row + row]!.push({
 						...span,
+						readingOrder:
+							part.readingOrder ??
+							(span.readingOrder
+								? { ...span.readingOrder, occurrence: `v${index}/${span.readingOrder.occurrence ?? ""}` }
+								: undefined),
 						columnStart: span.columnStart + part.column,
 						columnEnd: span.columnEnd + part.column,
 						breakBefore: firstContent || span.breakBefore,
@@ -90,6 +97,11 @@ export function projectSelectionPart(rows: CopySpan[][], part: SelectionProjecti
 			const clippedBefore = interrupted.get(span.source)?.delete(span.flow) ?? false;
 			rows[row]!.push({
 				...span,
+				readingOrder:
+					part.readingOrder ??
+					(span.readingOrder
+						? { ...span.readingOrder, occurrence: `${part.flow}/${span.readingOrder.occurrence ?? ""}` }
+						: undefined),
 				columnStart: Math.max(left, columnStart),
 				columnEnd: Math.min(right, columnEnd),
 				flow: `${part.flow}/${span.flow ?? ""}`,

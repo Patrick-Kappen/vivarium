@@ -113,7 +113,15 @@ export class MarkdownSelection {
 					};
 				});
 				if (row === 0 && source) {
-					return [...legacySelectionRow(prefix).map((span) => ({ ...span, source, flow: first?.flow })), ...spans];
+					return [
+						...legacySelectionRow(prefix).map((span) => ({
+							...span,
+							source,
+							flow: first?.flow,
+							readingOrder: first?.readingOrder,
+						})),
+						...spans,
+					];
 				}
 				return spans;
 			});
