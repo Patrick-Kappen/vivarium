@@ -1,0 +1,5 @@
+{
+	"extends": "./tsconfig.build.json",
+	"include": ["src/experimental/mini/**/*.ts", "src/**/*.d.ts"],
+	"exclude": ["node_modules", "dist"]
+}
