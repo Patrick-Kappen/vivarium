@@ -9,8 +9,8 @@ import { TuiAltScreen } from "../src/tui-alt-screen.ts";
 import { stripTerminalSequences, visibleWidth } from "../src/utils.ts";
 import { VirtualTerminal } from "./virtual-terminal.ts";
 
-// Text cases now assert corrected behavior. Documented losses remain legacy
-// characterization until Markdown and wrapper metadata are implemented.
+// Text and Box cases assert corrected behavior. Remaining documented losses
+// characterize Markdown and decorators that do not yet forward metadata.
 interface Point {
 	x: number;
 	y: number;
@@ -125,10 +125,10 @@ describe("fullscreen Text copy regressions and legacy baseline", () => {
 		);
 	});
 
-	it("documents Box padding being copied as if it were source indentation", async () => {
+	it("excludes Box padding while preserving source indentation", async () => {
 		const box = new Box(2, 1);
 		box.addChild(new Text("first\n  middle\nlast", 0, 0));
-		assert.equal(await copySelection(box, 32, { x: 2, y: 1 }, { x: 5, y: 3 }), "first\n    middle\n  last");
+		assert.equal(await copySelection(box, 32, { x: 2, y: 1 }, { x: 5, y: 3 }), "first\n  middle\nlast");
 	});
 
 	it("preserves source tabs and trailing spaces", async () => {
@@ -199,5 +199,5 @@ describe("remaining cross-renderer selection-copy acceptance targets", () => {
 	it.todo("extends Text padding exclusion to layout and decorator padding without changing source whitespace");
 	it.todo("copies across message boundaries without headers or hidden thinking content");
 	it.todo("extends Text selection lifecycle coverage to streaming message and Markdown integration");
-	it.todo("composes maps through Container, Box, stacks, ScrollView and extension wrappers");
+	it.todo("completes horizontal/clipped-column composition and extension wrapper metadata contracts");
 });

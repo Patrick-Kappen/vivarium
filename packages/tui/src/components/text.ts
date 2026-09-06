@@ -1,4 +1,4 @@
-import { setSelectionMap, textSelectionMap } from "../selection-map.ts";
+import { type CopySource, setSelectionMap, textSelectionMap } from "../selection-map.ts";
 import type { Component } from "../tui.ts";
 import { applyBackgroundToLine, stripTerminalSequences, visibleWidth, wrapTextWithAnsiRanges } from "../utils.ts";
 
@@ -7,6 +7,7 @@ import { applyBackgroundToLine, stripTerminalSequences, visibleWidth, wrapTextWi
  */
 export class Text implements Component {
 	private text: string;
+	private copySource: CopySource;
 	private paddingX: number; // Left/right padding
 	private paddingY: number; // Top/bottom padding
 	private customBgFn?: (text: string) => string;
@@ -18,12 +19,15 @@ export class Text implements Component {
 
 	constructor(text: string = "", paddingX: number = 1, paddingY: number = 1, customBgFn?: (text: string) => string) {
 		this.text = text;
+		this.copySource = { text: stripTerminalSequences(text) };
 		this.paddingX = paddingX;
 		this.paddingY = paddingY;
 		this.customBgFn = customBgFn;
 	}
 
 	setText(text: string): void {
+		const plain = stripTerminalSequences(text);
+		if (plain !== this.copySource.text) this.copySource = { text: plain };
 		this.text = text;
 		this.cachedText = undefined;
 		this.cachedWidth = undefined;
@@ -98,6 +102,7 @@ export class Text implements Component {
 
 		const result = [...emptyLines, ...contentLines, ...emptyLines];
 		const sourceText = this.text;
+		const copySource = this.copySource;
 		const paddingY = this.paddingY;
 		const hasBackground = this.customBgFn !== undefined;
 		setSelectionMap(result, () => {
@@ -108,7 +113,7 @@ export class Text implements Component {
 						return undefined;
 				}
 			}
-			return textSelectionMap(sourceText, normalizedText, ranges, paddingX, paddingY, contentWidth);
+			return textSelectionMap(sourceText, normalizedText, ranges, paddingX, paddingY, contentWidth, copySource);
 		});
 
 		// Update cache

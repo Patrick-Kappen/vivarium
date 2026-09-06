@@ -1,8 +1,10 @@
+import { composeVerticalSelection, type VerticalSelectionPart } from "../selection-compose.ts";
 import { type Component, dispatchMouseEvent, type TuiMouseDispatchResult, type TuiMouseEvent } from "../tui.ts";
 import { applyBackgroundToLine, visibleWidth } from "../utils.ts";
 
 type RenderCache = {
 	childLines: string[];
+	childSnapshots: readonly (readonly string[])[];
 	width: number;
 	bgSample: string | undefined;
 	lines: string[];
@@ -108,9 +110,11 @@ export class Box implements Component {
 
 		// Render all children
 		const childLines: string[] = [];
+		const parts: VerticalSelectionPart[] = [];
 		const mouseChildren: Array<{ component: Component; height: number }> = [];
 		for (const child of this.children) {
 			const lines = child.render(contentWidth);
+			parts.push({ lines, row: this.paddingY + childLines.length, column: this.paddingX, width: contentWidth });
 			mouseChildren.push({ component: child, height: lines.length });
 			for (const line of lines) {
 				childLines.push(leftPad + line);
@@ -125,31 +129,25 @@ export class Box implements Component {
 		// Check if bgFn output changed by sampling
 		const bgSample = this.bgFn ? this.bgFn("test") : undefined;
 
-		// Check cache validity
-		if (this.matchCache(width, childLines, bgSample)) {
-			return this.cache!.lines;
+		const cached = this.matchCache(width, childLines, bgSample) ? this.cache : undefined;
+		if (
+			cached &&
+			cached.childSnapshots.length === parts.length &&
+			cached.childSnapshots.every((snapshot, index) => snapshot === parts[index]!.lines)
+		)
+			return cached.lines;
+
+		// Equal pixels can carry different source text (e.g. a tab versus spaces).
+		// Reuse cached painting, but never rebind metadata on an older snapshot.
+		const result: string[] = cached ? [...cached.lines] : [];
+		if (!cached) {
+			for (let i = 0; i < this.paddingY; i++) result.push(this.applyBg("", width));
+			for (const line of childLines) result.push(this.applyBg(line, width));
+			for (let i = 0; i < this.paddingY; i++) result.push(this.applyBg("", width));
 		}
+		composeVerticalSelection(result, parts);
 
-		// Apply background and padding
-		const result: string[] = [];
-
-		// Top padding
-		for (let i = 0; i < this.paddingY; i++) {
-			result.push(this.applyBg("", width));
-		}
-
-		// Content
-		for (const line of childLines) {
-			result.push(this.applyBg(line, width));
-		}
-
-		// Bottom padding
-		for (let i = 0; i < this.paddingY; i++) {
-			result.push(this.applyBg("", width));
-		}
-
-		// Update cache
-		this.cache = { childLines, width, bgSample, lines: result };
+		this.cache = { childLines, childSnapshots: parts.map((part) => part.lines), width, bgSample, lines: result };
 
 		return result;
 	}

@@ -10,6 +10,8 @@ import {
 // Internal prototype, deliberately not exported from the package entrypoint.
 export interface CopySource {
 	readonly text: string;
+	/** An explicitly positioned legacy row still trims selected trailing whitespace. */
+	readonly legacy?: boolean;
 }
 
 export interface CopySpan {
@@ -119,7 +121,10 @@ export function selectionText(
 		}
 	}
 	const text = chunks
-		.map((chunk) => (chunk.source ? chunk.source.text.slice(chunk.start, chunk.end) : chunk.text!))
+		.map((chunk) => {
+			const text = chunk.source ? chunk.source.text.slice(chunk.start, chunk.end) : chunk.text!;
+			return chunk.source?.legacy ? text.trimEnd() : text;
+		})
 		.join("\n");
 	return text.length ? text : undefined;
 }
@@ -132,6 +137,7 @@ export function textSelectionMap(
 	paddingX: number,
 	paddingY: number,
 	contentWidth: number,
+	source: CopySource,
 ): SelectionMap | undefined {
 	const starts: number[] = [];
 	const ends: number[] = [];
@@ -155,7 +161,6 @@ export function textSelectionMap(
 			ends.push(plain.length);
 		}
 	}
-	const source: CopySource = { text: plain };
 	const logicalEnds = [...normalized.matchAll(/\r\n|\r|\n/g)].map((match) => match.index);
 	logicalEnds.push(normalized.length);
 	let logicalLine = 0;

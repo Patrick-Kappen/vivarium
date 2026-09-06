@@ -1,3 +1,4 @@
+import { composeVerticalSelection, type VerticalSelectionPart } from "../selection-compose.ts";
 import { allocateStackSizes, Stack, type StackChild, type StackOptions, visibleStackEntries } from "./stack.ts";
 
 export class VStack extends Stack {
@@ -18,14 +19,23 @@ export class VStack extends Stack {
 			this.gap,
 		);
 		const lines: string[] = [];
+		const parts: VerticalSelectionPart[] = [];
 		for (let index = 0; index < entries.length; index++) {
 			if (index > 0) {
 				for (let gap = 0; gap < this.gap; gap++) lines.push("");
 			}
+			parts.push({
+				lines: rendered[index]!,
+				row: lines.length,
+				column: 0,
+				width: viewport.width,
+				height: sizes[index]!,
+			});
 			const childLines = rendered[index]!.slice(0, sizes[index]);
 			lines.push(...childLines);
 			for (let padding = childLines.length; padding < sizes[index]!; padding++) lines.push("");
 		}
+		composeVerticalSelection(lines, parts);
 		return lines;
 	}
 }

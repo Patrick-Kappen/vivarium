@@ -1,8 +1,8 @@
 # Source-aware fullscreen selection (proposal)
 
-Status: draft internal Text/fullscreen integration. Text copying now uses source
-metadata; Markdown and general wrapper integration remain unfinished. No public
-selection API is exported.
+Status: draft internal Text and vertical-layout/fullscreen integration. Text, Box
+and VStack now forward source metadata; Markdown, horizontal layout and extension
+integration remain unfinished. No public selection API is exported.
 Baseline: Vivarium `d0e76d057` (merged Pi 0.85.1 synchronization).
 
 ## Implementation progress
@@ -26,9 +26,24 @@ that could accidentally bypass a subclass's overridden render(). ScrollView copy
 uses the existing unscrolled content snapshot. The non-scroll viewport projects
 full-width leaf metadata and vertical clipping; horizontal/clipped composition
 still falls back. Both clipboard extraction and highlighting use mapped spans.
-Legacy rows in mixed selections retain their existing behavior. Independent copy
+Box translates child spans past its padding. VStack omits gap/growth rows and
+clips child maps to allocated heights; viewport projection does the same for
+full-width vertical layout nodes. ScrollView's string-array facade also forwards
+maps when reserving a scrollbar column.
+
+An unmapped child inside these wrappers remains a set of independent legacy copy
+rows: visual wraps stay newlines and selected trailing whitespace is still trimmed.
+Only the enclosing wrapper's known padding is excluded. Legacy frame characters
+are not stripped. Background functions that rewrite content trigger fallback.
+Legacy rows in mixed selections retain their existing content semantics. Independent copy
 blocks currently receive one separating newline in addition to their source text;
 full boundary composition is still pending.
+
+Box caching separates painted output from source snapshots. Equal-looking tabs
+and spaces can reuse painting but require distinct metadata snapshots. Unchanged
+child snapshots still reuse the cached result. Text source identity is tied to
+logical text rather than measurement width, so incidental mouse/layout renders
+and styling invalidation cannot cancel an otherwise unchanged selection.
 
 Selections are cleared on width changes, changes to selected source mappings,
 removal of the selected scroll view or appearance/disappearance of an overlay.
@@ -37,9 +52,9 @@ render arrays, text-rewriting background callbacks and glyphs too wide for the
 viewport fall back rather than receiving guessed mappings. This is an internal
 prototype fallback, not the final validation policy for a public metadata API.
 
-`../test/text-selection.test.ts` adds 28 end-to-end/snapshot tests. The earlier
-Text copy-loss cases now assert corrected output; Box, Markdown and unmanaged
-decorator losses remain explicit characterization tests. No real editor paste or
+`../test/text-selection.test.ts` contains 28 Text and 20 vertical-composition tests.
+The earlier Text and Box copy-loss cases now assert corrected output; Markdown
+and unmanaged decorator losses remain explicit characterization tests. No real editor paste or
 terminal-native selection guarantee is claimed yet.
 
 Tests in `../test/wrap-source-ranges.test.ts` cover exact source offsets, explicit
@@ -101,7 +116,7 @@ endpoints are inside the body. Removing borders alone does not solve wrapping.
 `TuiAltScreen` and captures its injected clipboard callback. Thirteen baseline
 cases cover explicit and blank lines, indentation, wrapping, generic decoration,
 Box padding, tabs, trailing spaces, Markdown code and prose, graphemes, resizing
-before selection and scrolled content coordinates. Text cases now assert desired
+before selection and scrolled content coordinates. Text and Box cases now assert desired
 behavior; remaining losses characterize unmapped components. Six TODO targets
 track the broader cross-renderer integration, not missing Text-only tests.
 No system clipboard or model endpoint is used by these tests.
@@ -134,8 +149,9 @@ The initial proposal considered `Component.renderWithMetadata(width)`. The Text
 prototype instead keeps `render(width): string[]` unchanged and uses an internal
 WeakMap keyed by the exact returned array. This avoids inherited metadata methods
 bypassing an overridden render() in legacy wrappers. A changed array is not a
-valid mapped snapshot. Container forwards metadata only for its own concatenation;
-wrappers that produce new arrays must explicitly forward maps in a later step.
+valid mapped snapshot. Container forwards metadata for its own concatenation;
+Box, VStack and the ScrollView facade forward their explicit vertical geometry.
+Horizontal layouts and extension wrappers still need equivalent integration.
 
 The public helper/API shape remains under review until composition is complete.
 The types below describe the intended information, not the current internal

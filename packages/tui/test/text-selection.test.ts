@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
+import { Box } from "../src/components/box.ts";
 import { ScrollView } from "../src/components/scroll-view.ts";
 import { Text } from "../src/components/text.ts";
+import { VStack } from "../src/components/v-stack.ts";
 import { getSelectionMap } from "../src/selection-map.ts";
 import { type Component, Container } from "../src/tui.ts";
 import { TuiAltScreen } from "../src/tui-alt-screen.ts";
@@ -312,5 +314,172 @@ describe("source-aware Text fullscreen selection", () => {
 	it("does not attach guessed metadata when a background callback rewrites text", () => {
 		const component = new Text("original", 0, 0, () => "replacement");
 		assert.equal(getSelectionMap(component.render(20)), undefined);
+	});
+});
+
+describe("source-aware vertical composition", () => {
+	for (const mode of ["implicit", "scroll", "viewport"] as const) {
+		it(`copies through nested Box padding and backgrounds (${mode})`, async () => {
+			for (const width of [20, 40]) {
+				const source = "first logical line that wraps\n\n\tindented code  ";
+				const inner = new Box(2, 1, (text) => `\x1b[44m${text}\x1b[49m`);
+				inner.addChild(new Text(source, 1, 1));
+				const outer = new Box(1, 1);
+				outer.addChild(inner);
+				outer.addChild(new Text("tail", 0, 0));
+				await withSelection(outer, width, mode, async (fixture) => {
+					select(fixture, 0, 0, width - 1, outer.render(width).length - 1);
+					assert.equal(await fixture.tui.copyActiveSelectionToClipboard(), true);
+					assert.deepEqual(fixture.copied, [`${source}\ntail`]);
+				});
+			}
+		});
+
+		it(`excludes VStack gaps, allocated padding and hidden/clipped children (${mode})`, async () => {
+			const stack = new VStack(
+				[
+					{ component: new Text("first\nclipped secret", 0, 0), basis: 1, shrink: 0 },
+					{ component: new Text("hidden secret", 0, 0), visible: () => false },
+					{ component: new Text("last", 0, 0), basis: 3, shrink: 0 },
+				],
+				{ gap: 2 },
+			);
+			await withSelection(stack, 20, mode, async (fixture) => {
+				select(fixture, 0, 0, 19, stack.render(20).length - 1);
+				assert.equal(await fixture.tui.copyActiveSelectionToClipboard(), true);
+				assert.deepEqual(fixture.copied, ["first\nlast"]);
+			});
+		});
+
+		it(`keeps repeated cached Text occurrences separate across stack gaps (${mode})`, async () => {
+			const shared = new Text("repeat", 0, 0);
+			const stack = new VStack([shared, shared], { gap: 3 });
+			await withSelection(stack, 20, mode, async (fixture) => {
+				select(fixture, 0, 0, 19, 4);
+				fixture.tui.renderNow();
+				assert.equal(await fixture.tui.copyActiveSelectionToClipboard(), true);
+				assert.deepEqual(fixture.copied, ["repeat\nrepeat"]);
+			});
+		});
+
+		it(`does not copy or highlight Box padding or a VStack gap (${mode})`, async () => {
+			const box = new Box(2, 1);
+			box.addChild(new Text("content", 0, 0));
+			const stack = new VStack([box, new Text("last", 0, 0)], { gap: 2 });
+			await withSelection(stack, 20, mode, async (fixture) => {
+				fixture.terminal.writes.length = 0;
+				select(fixture, 0, 1, 1, 1);
+				assert.equal(await fixture.tui.copyActiveSelectionToClipboard(), false);
+				select(fixture, 0, 3, 19, 3);
+				assert.equal(await fixture.tui.copyActiveSelectionToClipboard(), false);
+				assert.ok(!fixture.terminal.writes.join("").includes("\x1b[7m"));
+			});
+		});
+	}
+
+	it("keeps logical source identity stable across measurement widths and style invalidation", () => {
+		const component = new Text("stable logical text", 0, 0);
+		const original = getSelectionMap(component.render(30))?.[0]?.[0]?.source;
+		component.render(10);
+		component.invalidate();
+		assert.equal(getSelectionMap(component.render(30))?.[0]?.[0]?.source, original);
+		component.setText("\x1b[31mstable logical text\x1b[0m");
+		assert.equal(getSelectionMap(component.render(30))?.[0]?.[0]?.source, original);
+	});
+
+	it("forks Box snapshots when equal pixels have different logical text, without repainting", () => {
+		const text = new Text("\tX", 0, 0);
+		let paints = 0;
+		const box = new Box(1, 1, (line) => {
+			paints++;
+			return line;
+		});
+		box.addChild(text);
+		const before = box.render(20);
+		const calls = paints;
+		text.setText("   X");
+		const after = box.render(20);
+		assert.deepEqual(after, before);
+		assert.notEqual(after, before);
+		assert.equal(paints, calls + 1, "only the background sample should run on a painting cache hit");
+		assert.equal(getSelectionMap(before)?.[1]?.[0]?.source.text, "\tX");
+		assert.equal(getSelectionMap(after)?.[1]?.[0]?.source.text, "   X");
+		assert.equal(box.render(20), after, "unchanged child snapshots should still reuse the Box result");
+	});
+
+	it("invalidates selection on equal-looking source changes inside a cached Box", async () => {
+		const text = new Text("\tX", 0, 0);
+		const box = new Box(1, 1);
+		box.addChild(text);
+		await withSelection(box, 20, "scroll", async (fixture) => {
+			select(fixture, 1, 1, 4, 1);
+			text.setText("   X");
+			fixture.tui.renderNow();
+			assert.equal(await fixture.tui.copyActiveSelectionToClipboard(), false);
+			select(fixture, 1, 1, 4, 1);
+			assert.equal(await fixture.tui.copyActiveSelectionToClipboard(), true);
+			assert.deepEqual(fixture.copied, ["   X"]);
+		});
+	});
+
+	it("preserves legacy row trimming while excluding only Box-owned padding", async () => {
+		const box = new Box(2, 1);
+		box.addChild({ render: () => ["text   suffix", "", "  last  "], invalidate: () => {} });
+		await withSelection(box, 20, "scroll", async (fixture) => {
+			select(fixture, 2, 1, 8, 1);
+			fixture.tui.renderNow();
+			assert.equal(await fixture.tui.copyActiveSelectionToClipboard(), true);
+			assert.deepEqual(fixture.copied, ["text"]);
+			select(fixture, 0, 0, 19, 4);
+			assert.equal(await fixture.tui.copyActiveSelectionToClipboard(), true);
+			assert.deepEqual(fixture.copied, ["text", "text   suffix\n\n  last"]);
+		});
+	});
+
+	it("does not strip unknown frame characters when forwarding a legacy child", async () => {
+		const box = new Box(2, 1);
+		box.addChild({ render: () => ["| HEADER |", "|body|"], invalidate: () => {} });
+		await withSelection(box, 20, "scroll", async (fixture) => {
+			select(fixture, 0, 0, 19, 3);
+			assert.equal(await fixture.tui.copyActiveSelectionToClipboard(), true);
+			assert.deepEqual(fixture.copied, ["| HEADER |\n|body|"]);
+		});
+	});
+
+	it("forwards metadata through the ScrollView string-array facade with a reserved scrollbar column", async () => {
+		const source = "alpha beta gamma delta epsilon";
+		const component = new ScrollView(new Text(source, 0, 0), { scrollbar: "always" });
+		await withSelection(component, 14, "implicit", async (fixture) => {
+			select(fixture, 0, 0, 13, component.render(14).length - 1);
+			assert.equal(await fixture.tui.copyActiveSelectionToClipboard(), true);
+			assert.deepEqual(fixture.copied, [source]);
+		});
+	});
+
+	it("keeps source coordinates stable while dragging through scrolled Box content", async () => {
+		const box = new Box(2, 1);
+		box.addChild(new Text(Array.from({ length: 20 }, (_, row) => `line ${row}`).join("\n"), 0, 0));
+		await withSelection(
+			box,
+			20,
+			"scroll",
+			async (fixture) => {
+				fixture.terminal.sendInput("\x1b[<0;3;2M");
+				fixture.scroll.scrollTo(3);
+				fixture.tui.renderNow();
+				fixture.terminal.sendInput("\x1b[<32;8;4M");
+				fixture.terminal.sendInput("\x1b[<0;8;4m");
+				fixture.tui.renderNow();
+				assert.equal(await fixture.tui.copyActiveSelectionToClipboard(), true);
+				assert.deepEqual(fixture.copied, ["line 0\nline 1\nline 2\nline 3\nline 4\nline 5"]);
+			},
+			6,
+		);
+	});
+
+	it("does not inherit metadata through a Box background function that rewrites content", () => {
+		const box = new Box(1, 1, () => "replacement");
+		box.addChild(new Text("original", 0, 0));
+		assert.equal(getSelectionMap(box.render(20)), undefined);
 	});
 });
