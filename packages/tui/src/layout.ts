@@ -1,6 +1,7 @@
 import type { ScrollView } from "./components/scroll-view.ts";
 import { allocateStackSizes, visibleStackEntries } from "./components/stack.ts";
 import { getLayoutNode } from "./layout-node.ts";
+import { snapshotSelectionLines } from "./selection-map.ts";
 import { cropKittyImageLine, getKittyImageMetadata, isImageLine } from "./terminal-image.ts";
 import { type Component, CURSOR_MARKER, compositeTuiLine } from "./tui.ts";
 import {
@@ -74,7 +75,7 @@ function renderCached(context: LayoutContext, component: Component, width: numbe
 	}
 	let lines = widths.get(safeWidth);
 	if (!lines) {
-		lines = component.render(safeWidth);
+		lines = snapshotSelectionLines(component.render(safeWidth));
 		widths.set(safeWidth, lines);
 	}
 	return lines;
@@ -343,14 +344,20 @@ function paintBox(box: LayoutBox, screen: string[], totalWidth: number): void {
 				if (visibleRows < imageMetadata.rows) line = cropKittyImageLine(line, 0, visibleRows);
 			}
 			// Fast path: a full-width box painting onto an untouched row can use the
-			// source line reference directly. Compositing here would rebuild the row
-			// string through ANSI/grapheme segmentation every frame; padding is
-			// unnecessary because rows are written with erase-line and the final
-			// width clamp still truncates over-wide lines.
-			if (box.rect.x === 0 && box.rect.width >= totalWidth && (isImageLine(line) || !screen[row])) {
-				screen[row] = line;
+			// source line reference directly when it fits. Clip oversized output before
+			// selection styling, so a later width clamp cannot discard its closing reset.
+			const left = Math.max(0, box.rect.x, box.clip.x);
+			const right = Math.min(totalWidth, box.rect.x + box.rect.width, box.clip.x + box.clip.width);
+			if (right <= left) continue;
+			if (left === 0 && right === totalWidth && box.rect.x === 0 && (isImageLine(line) || !screen[row])) {
+				screen[row] =
+					isImageLine(line) || visibleWidth(line) <= totalWidth ? line : sliceByColumn(line, 0, totalWidth, true);
 			} else {
-				screen[row] = compositeTuiLine(screen[row] ?? "", line, box.rect.x, box.rect.width, totalWidth);
+				const start = left - box.rect.x;
+				const glyph = getGraphemeCellRange(line, start);
+				const missing = glyph && glyph.start < start ? Math.min(right - left, glyph.end - start) : 0;
+				const clipped = " ".repeat(missing) + sliceByColumn(line, start + missing, right - left - missing, true);
+				screen[row] = compositeTuiLine(screen[row] ?? "", clipped, left, right - left, totalWidth);
 			}
 		}
 	}

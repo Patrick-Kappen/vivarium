@@ -15,8 +15,14 @@ export interface CopySource {
 }
 
 export interface CopySpan {
-	/** Begin a separate vertical copy block, even when a cached source is reused. */
+	/** Begin a separate copy run, including repeated sources and clipping boundaries. */
 	readonly breakBefore?: boolean;
+	/** Stable layout lane; distinct horizontal occurrences never share a copy run. */
+	readonly flow?: string;
+	/** A trailing zero-cell anchor belongs to content before it, not the next pane. */
+	readonly anchorBefore?: boolean;
+	/** Expanded tab cells can be clipped separately while still copying one original tab. */
+	readonly splittable?: boolean;
 	readonly columnStart: number;
 	readonly columnEnd: number;
 	readonly source: CopySource;
@@ -44,10 +50,54 @@ export function getSelectionMap(lines: readonly string[]): SelectionMap | undefi
 	const record = records.get(lines);
 	if (!record) return undefined;
 	// Legacy wrappers may mutate a child's output instead of returning a new array.
-	if (lines.length !== record.lines.length || lines.some((line, index) => line !== record.lines[index]))
+	if (lines.length !== record.lines.length || record.lines.some((line, index) => line !== lines[index]))
 		return undefined;
 	record.resolved ??= { map: record.build() };
 	return record.resolved.map;
+}
+
+/** Own the painted array while retaining the metadata factory of this render, not a later one. */
+export function snapshotSelectionLines(lines: readonly string[]): string[] {
+	const record = records.get(lines);
+	const snapshot: string[] = record ? [...lines] : new Array(lines.length);
+	// Legacy renderers can return enormous sparse arrays. Do not expand their holes.
+	if (!record)
+		for (const key of Object.getOwnPropertyNames(lines)) {
+			const index = Number(key);
+			if (Number.isInteger(index) && index >= 0 && index < lines.length && String(index) === key)
+				snapshot[index] = lines[index]!;
+		}
+	if (
+		record &&
+		snapshot.length === record.lines.length &&
+		record.lines.every((line, index) => line === snapshot[index])
+	) {
+		setSelectionMap(snapshot, () => {
+			record.resolved ??= { map: record.build() };
+			return record.resolved.map;
+		});
+	}
+	return snapshot;
+}
+
+/** Keep unknown output as independent rendered rows, without inventing logical wrap metadata. */
+export function legacySelectionRow(line: string): readonly CopySpan[] {
+	const source = { text: stripTerminalSequences(line), legacy: true };
+	const spans: CopySpan[] = [];
+	let column = 0;
+	for (const segment of getGraphemeSegmenter().segment(source.text)) {
+		const end = column + visibleWidth(segment.segment);
+		spans.push({
+			columnStart: column,
+			columnEnd: end,
+			source,
+			start: segment.index,
+			end: segment.index + segment.segment.length,
+		});
+		column = end;
+	}
+	if (spans.length === 0) spans.push({ columnStart: 0, columnEnd: 0, source, start: 0, end: 0 });
+	return spans;
 }
 
 export function joinSelectionMaps(lines: string[], children: readonly string[][]): void {
@@ -82,7 +132,7 @@ export function selectedCopySpans(
 	return spans.filter((span) => {
 		if (span.columnStart < minColumn || span.columnEnd > maxColumn) return false;
 		if (span.columnStart === span.columnEnd) {
-			return span.columnStart >= start && span.columnEnd <= end;
+			return span.columnStart >= start && span.columnEnd <= end && (!span.anchorBefore || span.columnStart > start);
 		}
 		return span.columnStart < end && span.columnEnd > start;
 	});
@@ -96,13 +146,23 @@ export function selectionText(
 	columns: (line: string, row: number) => { start: number; end: number },
 	maxColumn: number,
 ): string | undefined {
-	const chunks: Array<{ source?: CopySource; start: number; end: number; text?: string }> = [];
+	const chunks: Array<{
+		source?: CopySource;
+		flow?: string;
+		row: number;
+		separator: string;
+		start: number;
+		end: number;
+		text?: string;
+	}> = [];
 	for (let row = firstRow; row <= lastRow; row++) {
 		const line = lines[row] ?? "";
 		const range = columns(line, row);
 		const spans = map?.[row];
 		if (spans === undefined) {
 			chunks.push({
+				row,
+				separator: chunks.length ? "\n" : "",
 				start: 0,
 				end: 0,
 				text: stripTerminalSequences(
@@ -113,19 +173,26 @@ export function selectionText(
 		}
 		for (const span of selectedCopySpans(spans, range.start, range.end, 0, maxColumn)) {
 			const previous = chunks[chunks.length - 1];
-			if (!span.breakBefore && previous?.source === span.source && span.start >= previous.start) {
+			if (
+				!span.breakBefore &&
+				previous?.source === span.source &&
+				previous.flow === span.flow &&
+				span.start >= previous.start
+			) {
 				previous.end = Math.max(previous.end, span.end);
+				previous.row = row;
 			} else {
-				chunks.push({ source: span.source, start: span.start, end: span.end });
+				const separator = !previous ? "" : previous.row === row && previous.flow !== span.flow ? "\t" : "\n";
+				chunks.push({ source: span.source, flow: span.flow, row, separator, start: span.start, end: span.end });
 			}
 		}
 	}
 	const text = chunks
 		.map((chunk) => {
 			const text = chunk.source ? chunk.source.text.slice(chunk.start, chunk.end) : chunk.text!;
-			return chunk.source?.legacy ? text.trimEnd() : text;
+			return chunk.separator + (chunk.source?.legacy ? text.trimEnd() : text);
 		})
-		.join("\n");
+		.join("");
 	return text.length ? text : undefined;
 }
 
@@ -188,7 +255,14 @@ export function textSelectionMap(
 			if (previous && previous.start === start && previous.end === end && previous.columnEnd === column) {
 				spans[spans.length - 1] = { ...previous, columnEnd: column + cells };
 			} else {
-				spans.push({ columnStart: column, columnEnd: column + cells, source, start, end });
+				spans.push({
+					columnStart: column,
+					columnEnd: column + cells,
+					source,
+					start,
+					end,
+					splittable: source.text[start] === "\t",
+				});
 			}
 			column += cells;
 		}
@@ -204,6 +278,7 @@ export function textSelectionMap(
 			spans.push({
 				columnStart: column,
 				columnEnd: column,
+				anchorBefore: spans.length > 0,
 				source,
 				start: spans.length ? end : (starts[range.start] ?? plain.length),
 				end: logicalEnd,

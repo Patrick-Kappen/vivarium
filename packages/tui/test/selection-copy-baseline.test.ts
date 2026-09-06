@@ -199,5 +199,5 @@ describe("remaining cross-renderer selection-copy acceptance targets", () => {
 	it.todo("extends Text padding exclusion to layout and decorator padding without changing source whitespace");
 	it.todo("copies across message boundaries without headers or hidden thinking content");
 	it.todo("extends Text selection lifecycle coverage to streaming message and Markdown integration");
-	it.todo("completes horizontal/clipped-column composition and extension wrapper metadata contracts");
+	it.todo("finalizes separator/occlusion policy and extension wrapper metadata contracts");
 });

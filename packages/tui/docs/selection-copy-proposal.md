@@ -1,8 +1,8 @@
 # Source-aware fullscreen selection (proposal)
 
-Status: draft internal Text and vertical-layout/fullscreen integration. Text, Box
-and VStack now forward source metadata; Markdown, horizontal layout and extension
-integration remain unfinished. No public selection API is exported.
+Status: draft internal Text and layout/fullscreen integration. Text, Box, VStack
+and HStack now forward source metadata; Markdown and extension integration remain
+unfinished. No public selection API is exported.
 Baseline: Vivarium `d0e76d057` (merged Pi 0.85.1 synchronization).
 
 ## Implementation progress
@@ -24,26 +24,52 @@ cells remain for it. Selecting padding beyond that anchor does not select text.
 Plain Container forwards child snapshots without requiring a second render method
 that could accidentally bypass a subclass's overridden render(). ScrollView copying
 uses the existing unscrolled content snapshot. The non-scroll viewport projects
-full-width leaf metadata and vertical clipping; horizontal/clipped composition
-still falls back. Both clipboard extraction and highlighting use mapped spans.
+leaf metadata through vertical and horizontal clipping. Both clipboard extraction
+and highlighting use mapped spans.
 Box translates child spans past its padding. VStack omits gap/growth rows and
 clips child maps to allocated heights; viewport projection does the same for
 full-width vertical layout nodes. ScrollView's string-array facade also forwards
 maps when reserving a scrollbar column.
+
+HStack gives each horizontal occurrence a stable lane, including repeated uses of
+one cached Text. Selection follows screen row order: separate lanes on the same
+row receive a tab, and changing copy blocks across rows receives a newline.
+Uninterrupted text in one lane still copies its original logical wraps/newlines.
+For example, two wrapped columns copy `alpha\tgamma\nbeta\tdelta`, not two
+reordered complete paragraphs. Alignment padding, hidden/zero-width children and
+gaps contribute no text. Trailing whitespace anchors belong to their preceding
+content, not the first cell of the next pane.
+
+Clipping removes whole source graphemes and marks interrupted runs per source/lane.
+Expanded tab cells are explicitly splittable: a visible part still copies one
+original tab and highlights only the visible cells.
+It must not bridge a hidden suffix or an entirely clipped row when joining later
+visible spans. Partially visible ScrollViews also restrict their copy source to
+the allocated horizontal clip. The renderer now respects parent horizontal clips
+when nested minimum sizes exceed their allocation, instead of painting into an
+adjacent column's gap. Over-wide leaf output is clipped before selection styling,
+so final truncation cannot discard the selection's closing ANSI reset.
 
 An unmapped child inside these wrappers remains a set of independent legacy copy
 rows: visual wraps stay newlines and selected trailing whitespace is still trimmed.
 Only the enclosing wrapper's known padding is excluded. Legacy frame characters
 are not stripped. Background functions that rewrite content trigger fallback.
 Legacy rows in mixed selections retain their existing content semantics. Independent copy
-blocks currently receive one separating newline in addition to their source text;
-full boundary composition is still pending.
+blocks currently receive one separating newline in addition to their source text,
+except for the same-row horizontal tab rule. The general boundary/occlusion contract
+is still pending. In particular, viewport maps exclude painted scrollbar cells,
+while scroll-owned selections retain the logical content width beneath an automatic
+overlay scrollbar. Transient overlay policy is not claimed complete by this step.
 
 Box caching separates painted output from source snapshots. Equal-looking tabs
 and spaces can reuse painting but require distinct metadata snapshots. Unchanged
 child snapshots still reuse the cached result. Text source identity is tied to
 logical text rather than measurement width, so incidental mouse/layout renders
 and styling invalidation cannot cancel an otherwise unchanged selection.
+Layout and horizontal-facade snapshots also own their painted arrays, retaining
+the original metadata factory even if a legacy renderer later mutates its array.
+Sparse legacy arrays are copied by existing indices rather than expanding holes;
+a billion-row sparse regression protects the clipped-viewport rendering path.
 
 Selections are cleared on width changes, changes to selected source mappings,
 removal of the selected scroll view or appearance/disappearance of an overlay.
@@ -53,6 +79,8 @@ viewport fall back rather than receiving guessed mappings. This is an internal
 prototype fallback, not the final validation policy for a public metadata API.
 
 `../test/text-selection.test.ts` contains 28 Text and 20 vertical-composition tests.
+`../test/horizontal-selection.test.ts` adds 38 horizontal, clipping and snapshot
+regressions. Both use the shared fullscreen SGR selection fixture.
 The earlier Text and Box copy-loss cases now assert corrected output; Markdown
 and unmanaged decorator losses remain explicit characterization tests. No real editor paste or
 terminal-native selection guarantee is claimed yet.
@@ -150,8 +178,8 @@ prototype instead keeps `render(width): string[]` unchanged and uses an internal
 WeakMap keyed by the exact returned array. This avoids inherited metadata methods
 bypassing an overridden render() in legacy wrappers. A changed array is not a
 valid mapped snapshot. Container forwards metadata for its own concatenation;
-Box, VStack and the ScrollView facade forward their explicit vertical geometry.
-Horizontal layouts and extension wrappers still need equivalent integration.
+Box, VStack, HStack and the ScrollView facade forward their explicit geometry.
+Extension wrappers still need equivalent integration through a validated public API.
 
 The public helper/API shape remains under review until composition is complete.
 The types below describe the intended information, not the current internal

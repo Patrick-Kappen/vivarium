@@ -1,37 +1,57 @@
-import type { LayoutBox, LayoutFrame } from "./layout.ts";
+import { getScrollbarGeometry, type LayoutBox, type LayoutFrame } from "./layout.ts";
 import { getLayoutNode } from "./layout-node.ts";
+import { projectSelectionPart } from "./selection-compose.ts";
 import { type CopySpan, getSelectionMap, type SelectionMap } from "./selection-map.ts";
 
-/** Full-width vertical projection; horizontal/clipped-column composition remains legacy. */
+/** Project the layout's painted leaves; allocated padding and scrollbar cells have no source. */
 export function getViewportSelectionMap(frame: LayoutFrame): SelectionMap | undefined {
-	const rows: (readonly CopySpan[] | undefined)[] = Array.from({ length: frame.height }, () => []);
-	let supported = true;
+	const rows: CopySpan[][] = Array.from({ length: frame.height }, () => []);
 	let mapped = false;
-	const visit = (box: LayoutBox): void => {
+	const visit = (box: LayoutBox, flow: string, parentRight: number): void => {
 		if (box.clip.width <= 0 || box.clip.height <= 0) return;
-		if (getLayoutNode(box.component)?.type === "vstack") mapped = true;
+		const node = getLayoutNode(box.component);
+		mapped ||= node?.type === "vstack" || node?.type === "hstack";
+		const left = Math.max(0, box.clip.x);
+		const right = Math.min(
+			parentRight,
+			box.clip.x + box.clip.width,
+			getScrollbarGeometry(box)?.column ?? parentRight,
+		);
 		if (box.lines) {
-			if (box.rect.x !== 0 || box.rect.width < frame.width || box.clip.x !== 0 || box.clip.width < frame.width) {
-				supported = false;
-				return;
-			}
-			const map = getSelectionMap(box.lines);
-			mapped ||= map !== undefined;
-			const first = Math.max(0, box.rect.y, box.clip.y);
-			const end = Math.min(frame.height, box.rect.y + box.rect.height, box.clip.y + box.clip.height);
-			let firstContent = true;
-			for (let row = first; row < end; row++) {
-				const sourceRow = (box.lineOffset ?? 0) + row - box.rect.y;
-				if (sourceRow >= box.lines.length) continue;
-				const spans = map?.[sourceRow];
-				if (firstContent && spans?.length) {
-					rows[row] = [{ ...spans[0]!, breakBefore: true }, ...spans.slice(1)];
-					firstContent = false;
-				} else rows[row] = spans;
-			}
+			mapped ||= getSelectionMap(box.lines) !== undefined;
+			projectSelectionPart(rows, {
+				lines: box.lines,
+				row: box.rect.y,
+				column: box.rect.x,
+				width: box.rect.width,
+				height: box.rect.height,
+				sourceRow: box.lineOffset,
+				clip: { ...box.clip, x: left, width: Math.max(0, right - left) },
+				flow,
+			});
 		}
-		for (const child of box.children) visit(child);
+		for (const [index, child] of box.children.entries()) visit(child, `${flow}/${index}`, right);
 	};
-	visit(frame.root);
-	return supported && mapped ? rows : undefined;
+	visit(frame.root, "root", frame.width);
+	for (const row of rows) row.sort((a, b) => a.columnStart - b.columnStart);
+	return mapped ? rows : undefined;
+}
+
+/** A partially visible pane must not recover its horizontally hidden text between selected rows. */
+export function getClippedSelectionMap(
+	lines: readonly string[],
+	left: number,
+	right: number,
+): SelectionMap | undefined {
+	if (getSelectionMap(lines) === undefined) return undefined;
+	const rows: CopySpan[][] = Array.from({ length: lines.length }, () => []);
+	projectSelectionPart(rows, {
+		lines,
+		row: 0,
+		column: 0,
+		width: right,
+		flow: "clip",
+		clip: { x: left, y: 0, width: Math.max(0, right - left), height: lines.length },
+	});
+	return rows;
 }

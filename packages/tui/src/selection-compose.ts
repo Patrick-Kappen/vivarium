@@ -1,5 +1,13 @@
-import { type CopySpan, getSelectionMap, setSelectionMap } from "./selection-map.ts";
-import { getGraphemeSegmenter, stripTerminalSequences, visibleWidth } from "./utils.ts";
+import type { LayoutRect } from "./layout.ts";
+import {
+	type CopySource,
+	type CopySpan,
+	getSelectionMap,
+	legacySelectionRow,
+	setSelectionMap,
+	snapshotSelectionLines,
+} from "./selection-map.ts";
+import { stripTerminalSequences, visibleWidth } from "./utils.ts";
 
 export interface VerticalSelectionPart {
 	readonly lines: readonly string[];
@@ -28,26 +36,7 @@ export function composeVerticalSelection(lines: string[], parts: readonly Vertic
 				) {
 					return undefined;
 				}
-				let spans = map?.[row];
-				if (spans === undefined) {
-					// Keep unmapped rows independent and preserve their trim-on-copy behavior.
-					const source = { text: plain, legacy: true };
-					const legacy: CopySpan[] = [];
-					let column = 0;
-					for (const segment of getGraphemeSegmenter().segment(plain)) {
-						const end = column + visibleWidth(segment.segment);
-						legacy.push({
-							columnStart: column,
-							columnEnd: end,
-							source,
-							start: segment.index,
-							end: segment.index + segment.segment.length,
-						});
-						column = end;
-					}
-					if (legacy.length === 0) legacy.push({ columnStart: 0, columnEnd: 0, source, start: 0, end: 0 });
-					spans = legacy;
-				}
+				const spans = map?.[row] ?? legacySelectionRow(childLine);
 				for (const span of spans) {
 					if (span.columnStart < 0 || span.columnEnd > part.width) return undefined;
 					rows[part.row + row]!.push({
@@ -60,6 +49,73 @@ export function composeVerticalSelection(lines: string[], parts: readonly Vertic
 				}
 			}
 		}
+		return rows;
+	});
+}
+
+export interface SelectionProjectionPart extends VerticalSelectionPart {
+	readonly clip: LayoutRect;
+	readonly flow: string;
+	readonly sourceRow?: number;
+}
+
+/** Project whole graphemes, retaining discontinuities so clipping cannot restore hidden source gaps. */
+export function projectSelectionPart(rows: CopySpan[][], part: SelectionProjectionPart): void {
+	const left = Math.max(0, part.column, part.clip.x);
+	const right = Math.min(part.column + part.width, part.clip.x + part.clip.width);
+	const first = Math.max(0, part.row, part.clip.y);
+	const end = Math.min(rows.length, part.row + (part.height ?? part.lines.length), part.clip.y + part.clip.height);
+	if (left >= right || first >= end) return;
+	const map = getSelectionMap(part.lines);
+	const interrupted = new Map<CopySource, Set<string | undefined>>();
+	let firstContent = true;
+	for (let row = first; row < end; row++) {
+		const sourceRow = (part.sourceRow ?? 0) + row - part.row;
+		const line = part.lines[sourceRow];
+		if (line === undefined) continue;
+		for (const span of map?.[sourceRow] ?? legacySelectionRow(line)) {
+			const columnStart = part.column + span.columnStart;
+			const columnEnd = part.column + span.columnEnd;
+			const partialCells = span.splittable && columnEnd > left && columnStart < right;
+			if ((columnStart < left || columnEnd > right) && !partialCells) {
+				let flows = interrupted.get(span.source);
+				if (!flows) {
+					flows = new Set();
+					interrupted.set(span.source, flows);
+				}
+				flows.add(span.flow);
+				continue;
+			}
+			const clippedBefore = interrupted.get(span.source)?.delete(span.flow) ?? false;
+			rows[row]!.push({
+				...span,
+				columnStart: Math.max(left, columnStart),
+				columnEnd: Math.min(right, columnEnd),
+				flow: `${part.flow}/${span.flow ?? ""}`,
+				breakBefore: firstContent || clippedBefore || span.breakBefore,
+			});
+			firstContent = false;
+		}
+	}
+}
+
+/** Horizontal render facades own only their child cells; gaps and alignment padding are decoration. */
+export function composeHorizontalSelection(
+	lines: string[],
+	parts: readonly VerticalSelectionPart[],
+	width: number,
+): void {
+	const snapshots = parts.map((part) => ({ ...part, lines: snapshotSelectionLines(part.lines) }));
+	setSelectionMap(lines, () => {
+		const rows: CopySpan[][] = Array.from({ length: lines.length }, () => []);
+		for (const [index, part] of snapshots.entries()) {
+			projectSelectionPart(rows, {
+				...part,
+				flow: String(index),
+				clip: { x: 0, y: 0, width, height: lines.length },
+			});
+		}
+		for (const row of rows) row.sort((a, b) => a.columnStart - b.columnStart);
 		return rows;
 	});
 }

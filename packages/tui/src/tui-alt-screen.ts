@@ -18,7 +18,7 @@ import {
 	type ScrollbarGeometry,
 } from "./layout.ts";
 import { getLayoutNode } from "./layout-node.ts";
-import { getViewportSelectionMap } from "./selection-layout.ts";
+import { getClippedSelectionMap, getViewportSelectionMap } from "./selection-layout.ts";
 import { getSelectionMap, type SelectionMap, selectedCopySpans, selectionText } from "./selection-map.ts";
 import type { Terminal } from "./terminal.ts";
 import {
@@ -107,6 +107,7 @@ interface SelectionRange {
 interface SelectionSource {
 	lines: readonly string[];
 	map: SelectionMap | undefined;
+	minColumn: number;
 	width: number;
 	overlay: boolean;
 }
@@ -1436,24 +1437,33 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		const scrollView = this.selectionAnchor?.scrollView;
 		const box = layout && scrollView ? getScrollViewBox(layout, scrollView) : undefined;
 		if (box?.scrollContentLines) {
+			const contentWidth = scrollView!.getContentWidth(box.rect.width);
+			const minColumn = Math.max(0, box.clip.x - box.rect.x);
+			const width = Math.max(0, Math.min(contentWidth, box.clip.x + box.clip.width - box.rect.x));
 			return {
 				lines: box.scrollContentLines,
-				map: getSelectionMap(box.scrollContentLines),
-				width: scrollView!.getContentWidth(box.rect.width),
+				map:
+					minColumn > 0 || width < contentWidth
+						? getClippedSelectionMap(box.scrollContentLines, minColumn, width)
+						: getSelectionMap(box.scrollContentLines),
+				minColumn,
+				width,
 				overlay: this.hasOverlay(),
 			};
 		}
-		if (scrollView) return { lines: [], map: undefined, width: 0, overlay: this.hasOverlay() };
+		if (scrollView) return { lines: [], map: undefined, minColumn: 0, width: 0, overlay: this.hasOverlay() };
 		const map = layout && !this.hasOverlay() ? getViewportSelectionMap(layout) : undefined;
+		const visible = (line: string) =>
+			stripTerminalSequences(
+				sliceByColumn(normalizeTerminalOutput(line), 0, layout?.width ?? this.terminal.columns, true),
+			);
 		const displayedMap = map?.map((spans, row) =>
-			stripTerminalSequences(screen[row] ?? "") ===
-			stripTerminalSequences(normalizeTerminalOutput(layout?.lines[row] ?? ""))
-				? spans
-				: undefined,
+			visible(screen[row] ?? "") === visible(layout?.lines[row] ?? "") ? spans : undefined,
 		);
 		return {
 			lines: screen,
 			map: displayedMap,
+			minColumn: 0,
 			width: layout?.width ?? this.terminal.columns,
 			overlay: this.hasOverlay(),
 		};
@@ -1466,6 +1476,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		if (
 			layout.width !== this.terminal.columns ||
 			previous.width !== next.width ||
+			previous.minColumn !== next.minColumn ||
 			previous.overlay !== next.overlay
 		) {
 			this.clearTextSelection();
@@ -1498,6 +1509,9 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 						(span.source !== other.source &&
 							!(span.source.legacy && other.source.legacy && span.source.text === other.source.text)) ||
 						span.breakBefore !== other.breakBefore ||
+						span.flow !== other.flow ||
+						span.anchorBefore !== other.anchorBefore ||
+						span.splittable !== other.splittable ||
 						span.start !== other.start ||
 						span.end !== other.end ||
 						span.columnStart !== other.columnStart ||
@@ -1525,7 +1539,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 			source.map,
 			selection.start.row,
 			selection.end.row,
-			(line, row) => this.getSelectionColumns(line, row, selection, 0, source.width),
+			(line, row) => this.getSelectionColumns(line, row, selection, source.minColumn, source.width),
 			source.width,
 		);
 	}
