@@ -1,0 +1,254 @@
+# Source-aware fullscreen selection (proposal)
+
+Status: design plus internal wrapping prototype. No public selection API or
+clipboard behavior change yet.
+Baseline: Vivarium `d0e76d057` (merged Pi 0.85.1 synchronization).
+
+## Implementation progress
+
+`wrapTextWithAnsiRanges()` now records each emitted row's input start/end offsets
+while wrapping. It shares the existing wrapping implementation; the ordinary
+string-array facade does not allocate range arrays. Offsets exclude synthetic
+style carry/reset sequences and point into the unchanged input, so gaps retain
+omitted wrap whitespace and real newline sequences without reconstruction.
+
+This is not yet a terminal-cell selection map. In particular, Text's tab
+expansion still needs a mapping back to the original tab; trimmed source tails
+need explicit endpoint semantics. Text, layout and fullscreen selection are not
+yet connected to this primitive. The initial copy-loss baseline remains expected
+to pass until that connection changes clipboard behavior.
+
+Tests in `../test/wrap-source-ranges.test.ts` cover exact source offsets, explicit
+newlines/blank lines, omitted wrap spaces, styling, tabs before expansion and
+wide/combining/emoji graphemes. Existing wrapping tests remain the independent
+render-output regression check.
+
+## Scope and ownership
+
+This work is an engine correctness fix, not a theme extension. Responsibilities
+are split as follows:
+
+| Owner | Owns | Does not own |
+| --- | --- | --- |
+| Vivarium engine | Logical selection, copy extraction, wrapping metadata and the generic rendering/decorator contract | Role/time styling, frame design or a resource-specific color palette |
+| `message-frames` in vivarium-resources | User/assistant message layout, role/time presentation, spacing, borders or borderless panels, and selection of existing theme color tokens | Clipboard reconstruction, copy-action interception, global theme colors, message content or toolcall rendering |
+| Theme resource in vivarium-resources | Color values for existing semantic theme roles | Message layout, selection or clipboard behavior |
+| Warden | Engine packaging and engine revision; resource packaging constructors | Resource styling or consumer activation |
+| Consumer (`nixos-config`) | Warden/resource pins, selected extensions/theme and their configuration | An independent engine revision overriding Warden |
+
+The engine must not depend on message-frames to provide correct mapped selection.
+The extension will only describe its own decoration and forward child metadata
+through the generic API once implemented. Disabling the extension restores
+ordinary presentation without disabling engine fixes. Components without metadata
+retain the explicitly scoped legacy fallback described below.
+
+Two separate workstreams and PRs:
+
+1. Engine selection correctness and its generic API, with engine-owned tests.
+2. Message-frames presentation, with resource-owned tests and a resource version.
+   Its later adoption of the selection API is an explicit compatibility change;
+   keep that integration distinguishable from the borderless layout redesign.
+
+A new color palette and a second extension styling the same messages are outside
+this scope. Toolcalls, streaming lifecycle, message/session data and model context
+remain unchanged. Release order is engine API, resource integration, then explicit
+consumer activation through a compatible Warden pin; no resource updates an
+engine or activates itself implicitly.
+
+## Problem and measured baseline
+
+`TuiAltScreen.getActiveSelectionText()` slices rendered terminal rows, strips
+terminal sequences, trims each row's end and joins rows with `\n`. Its sources
+are `previousScreen` or `LayoutBox.scrollContentLines`, not logical text.
+Clipboard transport improvements do not change this input.
+
+For example, a single logical line renders at width 32 as:
+
+```text
+alpha beta gamma delta epsilon
+zeta eta theta iota kappa lambda
+```
+
+Both ordinary fullscreen and ScrollView selection copy this visual newline.
+A frame also inserts borders into multiline selection, even when both mouse
+endpoints are inside the body. Removing borders alone does not solve wrapping.
+
+`../test/selection-copy-baseline.test.ts` drives SGR press/drag/release through
+`TuiAltScreen` and captures its injected clipboard callback. Thirteen baseline
+cases cover explicit and blank lines, indentation, wrapping, generic decoration,
+Box padding, tabs, trailing spaces, Markdown code and prose, graphemes, resizing
+before selection and scrolled content coordinates. These characterize CURRENT
+behavior, including bugs; six TODO acceptance targets explicitly remain unfixed.
+Replace bug-characterization assertions with desired outputs during implementation.
+No system clipboard or model endpoint is used by these tests.
+
+## Required behavior
+
+- Copy logical visible content, not terminal presentation or raw message JSON.
+- Preserve literal content characters, code indentation, tabs, trailing spaces,
+  explicit newlines and blank lines. Identical characters used as decoration
+  must not be copied. Never strip borders or infer indentation from whitespace.
+- Soft wrapping inserts no source newline and must retain wrap whitespace that
+  the renderer omits at a visual boundary. Partial selections include only the
+  logical interval between their selected content endpoints.
+- Markdown prose copies its displayed semantics (`**bold**` becomes `bold`),
+  not hidden markup. Code copies its logical code text without renderer-added
+  indentation or fence labels. A full-message Markdown-copy command is separate.
+- Markdown transformations run as today. Selection describes their displayed
+  result, not pre-transform content. Collapsed thinking and other hidden content
+  must never enter a selection through a source interval.
+- Preserve existing component identities, thinking mouse dispatch, OSC133 zones,
+  streaming, session data, model context, custom messages and toolcalls.
+- Retain legacy selection for components without metadata, as requested. Such
+  components do NOT gain logical-text guarantees automatically.
+- Native terminal/Shift selection remains terminal-owned. This contract applies
+  to application-owned fullscreen selection, not terminal-native copying.
+
+## Proposed rendering contract
+
+Introduce an optional `Component.renderWithMetadata(width)` and a shared engine
+render helper. The helper calls either that method OR legacy `render(width)`,
+never both to obtain one result. Existing `render(width): string[]` stays usable.
+
+Illustrative types, not an exported API yet:
+
+```ts
+interface CopyDocument {
+  readonly id: object;           // Stable identity of one logical copy block
+  readonly revision: number;     // Changes when its copy text changes
+  readonly text: string;         // Logical visible text, no ANSI or decoration
+}
+
+interface CopySpan {
+  readonly columnStart: number;  // Inclusive terminal cell column
+  readonly columnEnd: number;    // Exclusive terminal cell column
+  readonly document: CopyDocument;
+  readonly sourceStart: number;  // Inclusive UTF-16 offset in document.text
+  readonly sourceEnd: number;    // Exclusive UTF-16 offset in document.text
+}
+
+interface SelectionRow {
+  readonly spans: readonly CopySpan[];
+}
+
+interface SelectionMap {
+  readonly rows: readonly SelectionRow[];
+}
+
+interface RenderResult {
+  readonly lines: string[];
+  readonly selection?: SelectionMap;
+}
+```
+
+A render result is an immutable snapshot by contract. Maps have exactly one row
+per rendered line. Spans are ordered, non-overlapping and within rendered cell
+bounds. Source offsets fall on grapheme boundaries, not arbitrary code units.
+A wide character or displayed tab expansion may occupy several cells but maps
+to its entire source grapheme. Begin with grapheme-level spans for correctness;
+compress ordinary runs only after measuring memory and streaming costs.
+
+An absent map means legacy behavior. A present map with empty spans means known
+non-content, not fallback. Thus headers, borders, layout padding, scrollbars and
+image protocol data can be deliberately excluded without string heuristics.
+Invalid provided metadata must be diagnosed and excluded from mapped copying;
+do not silently expose supposedly decorative text via legacy fallback.
+
+Each document contains one continuous logical copy block, in reading order.
+It is NOT the original message source: hidden/collapsed content and unrendered
+Markdown syntax are absent. Renderers must split documents if displayed ranges
+are discontinuous or reordered. Do not bridge arbitrary gaps in raw Markdown.
+
+Within a document, real newlines and wrap whitespace live in `text`. For a
+selection spanning multiple visual rows, extract the interval between mapped
+endpoints once, rather than joining row strings. A selected empty content line
+needs an explicit zero-width span at its source boundary; it must not look like
+an empty decorative row. Empty rows between selected endpoints are preserved
+through the logical source interval.
+
+Independent documents need an explicit composition boundary, not a heuristic
+based on their visual spacing. Proposed defaults: one newline between vertically
+stacked copy blocks; no newline for wrapper decoration. The implementation must
+add boundary records/helpers alongside the row map before supporting mixed
+blocks. Horizontal stacks and Markdown tables need an explicit reading order
+and separator policy (for example a tab between cells), or legacy fallback for
+that entire region until specified. The illustrative types above intentionally
+do not claim to settle these composition boundaries.
+
+## Propagation through the engine
+
+1. Add an internal wrapping primitive that returns lines AND their source spans.
+   Keep `wrapTextWithAnsi()` as the existing string-array facade. Do not recover
+   mapping by comparing rendered text with source strings after rendering.
+2. Make Text construct its copy document before tab expansion and attach spans
+   during wrapping. Added margins/background fill have no spans. Its existing
+   whitespace-only rendering behavior stays unchanged unless separately agreed.
+3. Make Markdown construct logical visible copy text during token rendering,
+   retaining token-to-cell mapping through final wrapping. Preserve the existing
+   transform and highlighting pipelines. A highlighter/transformer that changes
+   text requires explicit mapping or scoped fallback, never guessed offsets.
+4. Make Container, Box and stacks compose child snapshots and translate spans
+   along with lines. Existing wrappers that call `child.render()` directly must
+   adopt the shared helper to forward maps. Opting in only Text is insufficient.
+5. Cache RenderResult atomically in layout measurement/painting. Carry maps into
+   LayoutBox and LayoutFrame, including unscrolled ScrollView content. Apply the
+   same clipping, line offsets, translations and overlay occlusion as painting.
+   A painted decoration must not reveal selectable text behind it.
+6. Let user/assistant inner wrappers and decorators forward child results using
+   generic helpers for padding, translation and decorative rows. Preserve their
+   outer component identity and current mouse-coordinate translation. No role,
+   timestamp or `message-frames` special cases belong in the clipboard engine.
+7. Resolve selection endpoints and highlights from the same snapshot. Extract
+   logical intervals for mapped blocks and legacy row slices only for unmapped
+   blocks. Pass the result to the existing injected clipboard/native transport.
+
+For mixed mapped/unmapped content, represent legacy blocks explicitly when
+composing results. Do not drop an unmapped toolcall and do not downgrade a whole
+transcript (which would make message decoration selectable again). Keep the
+legacy trimming/wrapping behavior localized to that legacy block. Do not change
+toolcall rendering or its streaming lifecycle as part of this work.
+
+## Selection lifecycle
+
+Screen columns and source offsets are different coordinate systems. Selection
+anchors should include document identity, revision and source boundaries. Keep
+content-relative coordinates for ScrollView hit testing; pure scrolling must
+not change selected source text or copy offscreen content outside the interval.
+
+Initial safe policy: clear a selection if a selected document changes or a
+reflow invalidates its mapping. Do not reinterpret old screen coordinates against
+new text. Unrelated message appends and scrolling should retain selections of
+unchanged documents. Source-anchored selection surviving arbitrary reflow is an
+optional later enhancement, not a reason to copy the wrong text in version one.
+This policy still needs acceptance coverage during active streaming and resize.
+
+Drag, reverse drag, word/line selection, keyboard copy and selection highlighting
+must use the same boundary resolution. A decoration-only selection yields no
+clipboard write. Endpoints in decorative cells snap inward to selected content;
+partial wide/tab cells select a complete mapped grapheme. Document boundaries
+must also handle explicit trailing newlines without duplicating separators.
+
+## Implementation and validation sequence
+
+1. Turn baseline cases into desired-output regressions alongside a pure mapping
+   extractor and source-aware Text wrapping. Include partial/reversed selection,
+   wrap spaces, tabs, wide/combining/emoji glyphs and literal border characters.
+2. Add atomic render/map composition and both fullscreen selection paths. Cover
+   nested Container/Box/stacks/ScrollView, clipping, overlays, gaps, scrollbars,
+   mixed legacy content, offscreen selection, invalidation and cache coherence.
+3. Add Markdown mapping and coding-agent integration tests: paragraphs, lists,
+   links, code blocks, tables, transforms, highlighting, collapsed thinking,
+   streaming, historical messages and unchanged OSC133/component identities.
+4. Publish the minimal reviewed types/helpers and document the extension
+   contract. Connect message-frames in a separate resource change. Keep the
+   borderless layout prototype separate; disabling decoration must still work.
+5. Run focused TUI and coding-agent tests plus `npm run check`; measure render
+   cost and map memory on large/streaming transcripts. Finish with actual paste
+   into an editor. Test native terminal selection separately and report limits.
+
+No acceptance claim should be based solely on the green characterization suite.
+The TODO targets become executable passing tests as the corresponding behavior
+is implemented. This baseline and wrapping primitive are submitted as a draft
+engine PR, not a completed clipboard fix. Validation passes with `npm run check`
+and the full isolated `./test.sh` after `npm run build:offline`. No resource,
+consumer pin update or deployment is included.
