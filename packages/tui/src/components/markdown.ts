@@ -598,30 +598,43 @@ export class Markdown implements Component {
 					stylePrefix: quoteStylePrefix,
 				};
 				const quoteTokens = token.tokens || [];
-				const renderedQuoteLines: string[] = [];
+				const quoteBlocks: string[][] = [];
 				for (let i = 0; i < quoteTokens.length; i++) {
-					const quoteToken = quoteTokens[i];
-					const nextQuoteToken = quoteTokens[i + 1];
-					renderedQuoteLines.push(
-						...this.renderToken(quoteToken, quoteContentWidth, nextQuoteToken?.type, quoteInlineStyleContext),
+					quoteBlocks.push(
+						this.renderToken(
+							quoteTokens[i],
+							quoteContentWidth,
+							quoteTokens[i + 1]?.type,
+							quoteInlineStyleContext,
+							selection,
+						),
 					);
 				}
-
-				// Avoid rendering an extra empty quote line before the outer blockquote spacing.
-				while (renderedQuoteLines.length > 0 && renderedQuoteLines[renderedQuoteLines.length - 1] === "") {
-					renderedQuoteLines.pop();
+				let wrappedQuote: string[];
+				const prefixes: string[] = [];
+				const recordPrefix = () => {
+					prefixes.push(this.theme.quoteBorder("│ "));
+				};
+				if (selection) {
+					wrappedQuote = selection.wrap(quoteBlocks, quoteContentWidth, {
+						style: applyQuoteStyle,
+						trimEmptyEnd: true,
+						onWrappedLine: recordPrefix,
+					});
+				} else {
+					const renderedQuoteLines = quoteBlocks.flat();
+					while (renderedQuoteLines.at(-1) === "") renderedQuoteLines.pop();
+					wrappedQuote = renderedQuoteLines.flatMap((line) => {
+						const wrapped = wrapTextWithAnsi(applyQuoteStyle(line), quoteContentWidth);
+						for (const _line of wrapped) recordPrefix();
+						return wrapped;
+					});
 				}
-
-				for (const quoteLine of renderedQuoteLines) {
-					const styledLine = applyQuoteStyle(quoteLine);
-					const wrappedLines = wrapTextWithAnsi(styledLine, quoteContentWidth);
-					for (const wrappedLine of wrappedLines) {
-						lines.push(this.theme.quoteBorder("│ ") + wrappedLine);
-					}
-				}
+				for (const [row, line] of wrappedQuote.entries()) lines.push(prefixes[row]! + line);
 				if (nextTokenType && nextTokenType !== "space") {
 					lines.push(""); // Add spacing after blockquotes (unless space token follows)
 				}
+				selection?.decoratePrefix(lines, wrappedQuote, prefixes);
 				break;
 			}
 

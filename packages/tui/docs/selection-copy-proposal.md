@@ -2,7 +2,7 @@
 
 Status: draft internal Text and layout/fullscreen integration. Text, Box, VStack
 and HStack forward source metadata. Basic Markdown emission is now mapped, but
-nested Markdown, lexer provenance and extension integration remain unfinished.
+list/table coverage, lexer provenance and extension integration remain unfinished.
 No public selection API is exported.
 Baseline: Vivarium `d0e76d057` (merged Pi 0.85.1 synchronization).
 
@@ -94,8 +94,8 @@ render-output regression check.
 ### Initial Markdown coverage
 
 `MarkdownSelection` records logical visible text at emission sites, before wrapping
-and margins. Paragraphs, inline formatting/links, headings and standalone code
-blocks now have source maps. Heading prefixes, code fences, code presentation
+and margins. Paragraphs, inline formatting/links, headings and code blocks now
+have source maps, including supported content inside recursively nested quotes. Heading prefixes, code fences, code presentation
 indent and horizontal rules are explicitly decoration, not stripped heuristically
 at copy time. Literal identical characters inside code remain content.
 
@@ -106,20 +106,28 @@ reordering highlighters retain legacy body rows rather than copying hidden origi
 code. Transformers still run before parsing at the original content width, and
 copy uses their visible output. Link URLs hidden in OSC 8 are not copied.
 
+Quote wrappers forward child metadata before adding their declared decorative
+prefixes. Further wrapping projects the existing spans rather than inventing a
+new source from border-prefixed output. The renderer still trims the same trailing
+empty quote rows and invokes quote styling/border callbacks in the same order.
+Inherited block metadata is resolved once per wrapped snapshot, not rescanned for
+every row; a read-count regression guards against quadratic validation work.
+
 Unchanged logical sources survive incidental measurement renders and unrelated
 paragraph appends. A streamed partial closing fence remains excluded when the
 closing fence completes. Old rendered snapshots do not read later Markdown state.
 Zero-cell blank anchors outside a clipped pane cannot select the neighbouring pane.
 
-This is deliberately incomplete: lists, blockquotes (including nested code),
-tables and block math still have legacy content rows. Inputs containing tabs or
+This is deliberately incomplete: lists, tables and block math still have legacy
+content rows. Their nested children also remain legacy; an enclosing mapped quote
+can exclude its own border without claiming those bodies are source-aware. Inputs containing tabs or
 CR currently keep the whole Markdown component unmapped because preprocessing and
 lexer normalization do not yet carry their original offsets. LF code token text
 is supported; this is not an original-Markdown-byte preservation guarantee.
 Multiple source blank lines collapsed by the renderer are not reconstructed.
 The existing general separator/occlusion and public API limitations still apply.
 
-`../test/markdown-selection.test.ts` adds 22 focused regressions. Existing Markdown
+`../test/markdown-selection.test.ts` contains 35 focused regressions. Existing Markdown
 render tests remain the independent check that presentation is unchanged. All of
 the remaining cases must be addressed before claiming complete message copying.
 

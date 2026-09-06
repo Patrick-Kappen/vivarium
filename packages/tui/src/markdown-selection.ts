@@ -1,6 +1,14 @@
-import { type CopySource, type CopySpan, setSelectionMap, textSelectionMap } from "./selection-map.ts";
+import {
+	type CopySource,
+	type CopySpan,
+	getSelectionMap,
+	legacySelectionRow,
+	type SelectionMap,
+	setSelectionMap,
+	textSelectionMap,
+} from "./selection-map.ts";
 import { isImageLine } from "./terminal-image.ts";
-import { stripTerminalSequences, wrapTextWithAnsiRanges } from "./utils.ts";
+import { stripTerminalSequences, visibleWidth, wrapTextWithAnsiRanges } from "./utils.ts";
 
 interface MarkdownLineSource {
 	source: CopySource;
@@ -64,47 +72,94 @@ export class MarkdownSelection {
 		}
 	}
 
-	wrap(blocks: readonly string[][], width: number): string[] {
+	decoratePrefix(result: string[], content: string[], prefixes: readonly string[]): void {
+		const height = result.length;
+		setSelectionMap(result, () => {
+			const map = getSelectionMap(content);
+			return Array.from({ length: height }, (_, row) => {
+				if (row >= content.length) return [];
+				const prefix = prefixes[row]!;
+				if (prefix.includes("\t")) return undefined;
+				const offset = visibleWidth(prefix);
+				return (map?.[row] ?? legacySelectionRow(content[row]!)).map((span) => ({
+					...span,
+					columnStart: span.columnStart + offset,
+					columnEnd: span.columnEnd + offset,
+				}));
+			});
+		});
+	}
+
+	wrap(
+		blocks: readonly string[][],
+		width: number,
+		options: { style?: (line: string) => string; trimEmptyEnd?: boolean; onWrappedLine?: () => void } = {},
+	): string[] {
 		const result: string[] = [];
 		const builders: Array<() => readonly (readonly CopySpan[] | undefined)[]> = [];
-		for (const block of blocks) {
-			for (const [index, line] of block.entries()) {
-				if (isImageLine(line)) {
-					result.push(line);
-					builders.push(() => [undefined]);
-					continue;
-				}
-				const wrapped = wrapTextWithAnsiRanges(line, width);
-				result.push(...wrapped.lines);
-				const descriptor = this.rows.get(block)?.get(index);
-				builders.push(() => {
-					if (descriptor === null) return wrapped.lines.map(() => []);
-					if (!descriptor || line.includes("\t")) return wrapped.lines.map(() => undefined);
-					const plain = stripTerminalSequences(line);
-					const map = textSelectionMap(line, line, wrapped.ranges, 0, 0, width, { text: plain });
-					return wrapped.lines.map((_, row) => {
-						const spans = map?.[row];
-						const prefix = descriptor.prefix.length;
-						if (
-							spans?.some(
-								(span) => span.start < prefix && span.end > prefix && span.columnStart !== span.columnEnd,
-							)
-						)
-							return undefined;
+		const inheritedMaps = new Map<string[], SelectionMap | undefined>();
+		const inputs = blocks.flatMap((block) => block.map((original, index) => ({ block, original, index })));
+		if (options.trimEmptyEnd) while (inputs.at(-1)?.original === "") inputs.pop();
+		for (const { block, original, index } of inputs) {
+			const line = options.style ? options.style(original) : original;
+			if (isImageLine(line) && !options.style) {
+				result.push(line);
+				builders.push(() => [undefined]);
+				continue;
+			}
+			const wrapped = wrapTextWithAnsiRanges(line, width);
+			for (const wrappedLine of wrapped.lines) {
+				options.onWrappedLine?.();
+				result.push(wrappedLine);
+			}
+			const descriptor = this.rows.get(block)?.get(index);
+			builders.push(() => {
+				if (descriptor === null) return wrapped.lines.map(() => []);
+				if (line.includes("\t") || stripTerminalSequences(line) !== stripTerminalSequences(original))
+					return wrapped.lines.map(() => undefined);
+				if (!descriptor) {
+					// Nested output is already mapped; reflow its cells without creating a
+					// new source from the quote-prefixed text. Validate each block only once.
+					if (!inheritedMaps.has(block)) inheritedMaps.set(block, getSelectionMap(block));
+					const spans = inheritedMaps.get(block)?.[index];
+					return wrapped.ranges.map((range, fragment) => {
+						const start = visibleWidth(line.slice(0, range.start));
+						const end = visibleWidth(line.slice(0, range.end));
+						const last = fragment === wrapped.ranges.length - 1;
 						return spans?.flatMap((span) => {
-							if (span.start < prefix && (span.columnStart !== span.columnEnd || span.end < prefix)) return [];
-							return [
-								{
-									...span,
-									source: descriptor.source,
-									start: Math.max(prefix, span.start) - prefix + descriptor.offset,
-									end: span.end - prefix + descriptor.offset,
-								},
-							];
+							if (span.columnStart === span.columnEnd) {
+								const anchor = last ? Math.min(span.columnStart, end) : span.columnStart;
+								if (anchor < start || anchor > end || (fragment > 0 && anchor === start && span.anchorBefore))
+									return [];
+								return [{ ...span, columnStart: anchor - start, columnEnd: anchor - start }];
+							}
+							if (span.columnStart < start || span.columnEnd > end) return [];
+							return [{ ...span, columnStart: span.columnStart - start, columnEnd: span.columnEnd - start }];
 						});
 					});
+				}
+				const plain = stripTerminalSequences(line);
+				const map = textSelectionMap(line, line, wrapped.ranges, 0, 0, width, { text: plain });
+				return wrapped.lines.map((_, row) => {
+					const spans = map?.[row];
+					const prefix = descriptor.prefix.length;
+					if (
+						spans?.some((span) => span.start < prefix && span.end > prefix && span.columnStart !== span.columnEnd)
+					)
+						return undefined;
+					return spans?.flatMap((span) => {
+						if (span.start < prefix && (span.columnStart !== span.columnEnd || span.end < prefix)) return [];
+						return [
+							{
+								...span,
+								source: descriptor.source,
+								start: Math.max(prefix, span.start) - prefix + descriptor.offset,
+								end: span.end - prefix + descriptor.offset,
+							},
+						];
+					});
 				});
-			}
+			});
 		}
 		setSelectionMap(result, () => builders.flatMap((build) => build()));
 		return result;

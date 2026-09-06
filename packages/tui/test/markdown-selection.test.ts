@@ -3,7 +3,8 @@ import { describe, it } from "node:test";
 import { HStack } from "../src/components/h-stack.ts";
 import { Markdown, type MarkdownTheme } from "../src/components/markdown.ts";
 import { Text } from "../src/components/text.ts";
-import { getSelectionMap, selectionText } from "../src/selection-map.ts";
+import { MarkdownSelection } from "../src/markdown-selection.ts";
+import { getSelectionMap, selectionText, setSelectionMap } from "../src/selection-map.ts";
 import { getCapabilities, setCapabilities } from "../src/terminal-image.ts";
 import { select, withSelection } from "./selection-test-utils.ts";
 
@@ -77,6 +78,82 @@ describe("Markdown emission selection metadata", () => {
 			}
 		});
 	}
+
+	for (const mode of ["implicit", "scroll", "viewport"] as const) {
+		it(`copies wrapped quote content without its border (${mode})`, async () => {
+			for (const width of [8, 16, 40]) {
+				const component = new Markdown("> **alpha** beta gamma delta epsilon", 1, 1, theme);
+				await withSelection(component, width, mode, async (fixture) => {
+					select(fixture, 0, 0, width - 1, component.render(width).length - 1);
+					assert.equal(await fixture.tui.copyActiveSelectionToClipboard(), true);
+					assert.deepEqual(fixture.copied, ["alpha beta gamma delta epsilon"]);
+				});
+			}
+		});
+
+		it(`preserves code and whitespace inside nested quotes (${mode})`, async () => {
+			const source = "function f() {\n\n    \n  return 42;  \n}";
+			const quoted = ["```js", ...source.split("\n"), "```"].map((line) => `> > ${line}`).join("\n");
+			for (const width of [8, 16, 40]) {
+				const component = new Markdown(quoted, 1, 1, theme);
+				await withSelection(component, width, mode, async (fixture) => {
+					select(fixture, 0, 0, width - 1, component.render(width).length - 1);
+					assert.equal(await fixture.tui.copyActiveSelectionToClipboard(), true);
+					assert.deepEqual(fixture.copied, [source]);
+				});
+			}
+		});
+
+		it(`does not copy or highlight quote borders but retains literal border content (${mode})`, async () => {
+			const component = new Markdown("> \u2502 literal", 0, 0, theme);
+			await withSelection(component, 20, mode, async (fixture) => {
+				fixture.terminal.writes.length = 0;
+				select(fixture, 0, 0, 1, 0);
+				assert.equal(await fixture.tui.copyActiveSelectionToClipboard(), false);
+				assert.ok(!fixture.terminal.writes.join("").includes("\x1b[7m"));
+				select(fixture, 0, 0, 19, 0);
+				assert.equal(await fixture.tui.copyActiveSelectionToClipboard(), true);
+				assert.deepEqual(fixture.copied, ["\u2502 literal"]);
+			});
+		});
+	}
+
+	it("preserves quote styling callback order", () => {
+		const calls: string[] = [];
+		new Markdown("> first\n>\n> second", 0, 0, {
+			...theme,
+			quote: (text) => {
+				calls.push(`style:${text}`);
+				return text;
+			},
+			quoteBorder: (text) => {
+				calls.push("border");
+				return text;
+			},
+		}).render(20);
+		assert.deepEqual(calls, ["style:\u0000", "style:first", "border", "style:", "border", "style:second", "border"]);
+	});
+
+	it("never restores hidden source through a rewriting quote style", async () => {
+		const component = new Markdown("> secret", 0, 0, { ...theme, quote: () => "visible" });
+		await withSelection(component, 20, "scroll", async (fixture) => {
+			select(fixture, 0, 0, 19, 0);
+			assert.equal(await fixture.tui.copyActiveSelectionToClipboard(), true);
+			assert.deepEqual(fixture.copied, ["visible"]);
+		});
+	});
+
+	it("keeps a quoted paragraph selected through measurement and unrelated streaming appends", async () => {
+		const component = new Markdown("> first paragraph", 0, 0, theme);
+		await withSelection(component, 30, "scroll", async (fixture) => {
+			select(fixture, 2, 0, 16, 0);
+			component.render(8);
+			component.setText("> first paragraph\n\nafterwards");
+			fixture.tui.renderNow();
+			assert.equal(await fixture.tui.copyActiveSelectionToClipboard(), true);
+			assert.deepEqual(fixture.copied, ["first paragraph"]);
+		});
+	});
 
 	for (const hyperlinks of [false, true]) {
 		it(`copies only printed link content (hyperlinks=${hyperlinks})`, async () => {
@@ -184,6 +261,22 @@ describe("Markdown emission selection metadata", () => {
 			selectionText(lines, getSelectionMap(lines), 3, 3, () => ({ start: 1, end: 3 }), 3),
 			"RR",
 		);
+	});
+
+	it("validates inherited block metadata only once per wrapped snapshot", () => {
+		let reads = 0;
+		const block = Array.from({ length: 200 }, () => "line");
+		Object.defineProperty(block, 0, {
+			get: () => {
+				reads++;
+				return "line";
+			},
+		});
+		setSelectionMap(block, () => block.map(() => []));
+		const wrapped = new MarkdownSelection([]).wrap([block], 10);
+		reads = 0;
+		getSelectionMap(wrapped);
+		assert.equal(reads, 2, "one snapshot validation and one factory evaluation, not a scan per row");
 	});
 
 	it("retains explicit legacy fallback for missing tab and CR lexer provenance", () => {
