@@ -32,6 +32,21 @@ PI_EXPERIMENTAL=1 ./pi-test.sh client
 
 The `client` and `experimental/plugin` package subpaths resolve only under the `source` condition in a checkout. Their implementations and the server/client commands are excluded from npm packages and standalone binaries. `pi-client`, `pi-protocol`, and `pi-server` are development dependencies of coding-agent, not runtime dependencies. The local SDK and stdio RPC API are unchanged.
 
+### Experimental mini client
+
+The mini client is also development-only. After the workspace build from Setup,
+compile its TUI, detached server and worker entrypoints separately:
+
+```bash
+npm run build:mini -w @earendil-works/pi-coding-agent
+./mini-test.sh --dist
+```
+
+The normal coding-agent build does not emit mini. Its development output under
+`dist/experimental/mini` remains excluded from npm packages. Without `--dist`,
+`./mini-test.sh` runs the TypeScript sources. Use `--fresh` after code changes to
+restart the detached mini server.
+
 ## Forking / Rebranding
 
 Configure via `package.json`:
