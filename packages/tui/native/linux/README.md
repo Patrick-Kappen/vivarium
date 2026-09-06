@@ -2,7 +2,7 @@
 
 Provides asynchronous X11 text and image reads using `libxcb.so.1`. Prebuilds support x64 and arm64 on glibc and musl. Reads have bounded waits; if a native operation stalls, the helper remains unavailable until it finishes.
 
-Coding-agent falls back to command-line tools when native reads are unavailable. Wayland reads use `wl-paste`; all Linux writes use the existing command-line or terminal clipboard paths.
+Coding-agent tries command-line reads first: `wl-paste` on Wayland, then X11 tools (`xclip`, and `xsel` for text). The native X11 helper is a fallback when those reads are unavailable. An empty clipboard is not treated as an unavailable backend. All Linux writes use the existing command-line or terminal clipboard paths.
 
 ## Building
 
