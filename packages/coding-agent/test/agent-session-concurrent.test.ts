@@ -185,6 +185,10 @@ describe("AgentSession concurrent prompt guard", () => {
 		const model = getModel("anthropic", "claude-sonnet-4-5")!;
 		let abortSignal: AbortSignal | undefined;
 		let sawSteeringMessage = false;
+		let notifyStreamStarted!: () => void;
+		const streamStarted = new Promise<void>((resolve) => {
+			notifyStreamStarted = resolve;
+		});
 		let lastInputSource: string | undefined;
 		const queueEvents: Array<{ steering: readonly string[]; followUp: readonly string[] }> = [];
 
@@ -199,6 +203,7 @@ describe("AgentSession concurrent prompt guard", () => {
 				abortSignal = options?.signal;
 				const stream = new MockAssistantStream();
 				queueMicrotask(() => {
+					notifyStreamStarted();
 					const userTexts = context.messages
 						.filter((message) => message.role === "user")
 						.map((message) => {
@@ -245,6 +250,8 @@ describe("AgentSession concurrent prompt guard", () => {
 			},
 			(pi) => {
 				pi.on("input", async (event) => {
+					// Exercise preflight that outlasts the former 10 ms startup assumption.
+					if (event.source === "interactive") await new Promise((resolve) => setTimeout(resolve, 30));
 					lastInputSource = event.source;
 				});
 			},
@@ -265,28 +272,32 @@ describe("AgentSession concurrent prompt guard", () => {
 		});
 
 		const firstPrompt = session.prompt("First message");
-		await new Promise((resolve) => setTimeout(resolve, 10));
-		expect(session.isStreaming).toBe(true);
+		try {
+			// Also observe prompt rejection immediately, rather than leaking it after teardown.
+			await Promise.race([streamStarted, firstPrompt]);
+			expect(session.isStreaming).toBe(true);
 
-		const pi = (
-			globalThis as typeof globalThis & {
-				testExtensionApi?: {
-					sendUserMessage: (content: string, options?: { deliverAs?: "steer" | "followUp" }) => void;
-				};
-			}
-		).testExtensionApi;
-		expect(pi).toBeDefined();
+			const pi = (
+				globalThis as typeof globalThis & {
+					testExtensionApi?: {
+						sendUserMessage: (content: string, options?: { deliverAs?: "steer" | "followUp" }) => void;
+					};
+				}
+			).testExtensionApi;
+			expect(pi).toBeDefined();
 
-		pi!.sendUserMessage("Steer from extension", { deliverAs: "steer" });
-		await new Promise((resolve) => setTimeout(resolve, 25));
+			pi!.sendUserMessage("Steer from extension", { deliverAs: "steer" });
+			await expect
+				.poll(() => queueEvents.some((event) => event.steering.includes("Steer from extension")))
+				.toBe(true);
 
-		expect(session.pendingMessageCount).toBe(1);
-		expect(session.getSteeringMessages()).toContain("Steer from extension");
-		expect(lastInputSource).toBe("extension");
-		expect(queueEvents.some((event) => event.steering.includes("Steer from extension"))).toBe(true);
-
-		await session.abort();
-		await firstPrompt.catch(() => {});
+			expect(session.pendingMessageCount).toBe(1);
+			expect(session.getSteeringMessages()).toContain("Steer from extension");
+			expect(lastInputSource).toBe("extension");
+		} finally {
+			await session.abort();
+			await firstPrompt.catch(() => {});
+		}
 
 		expect(sawSteeringMessage).toBe(true);
 	});
