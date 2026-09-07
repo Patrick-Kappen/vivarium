@@ -1,4 +1,4 @@
-import { type CopySource, setSelectionMap, textSelectionMap } from "../selection-map.ts";
+import { type CopySource, setSelectionMap, textSelectionMap, trackSelectionLines } from "../selection-map.ts";
 import type { Component } from "../tui.ts";
 import { applyBackgroundToLine, stripTerminalSequences, visibleWidth, wrapTextWithAnsiRanges } from "../utils.ts";
 
@@ -119,8 +119,8 @@ export class Text implements Component {
 		// Update cache
 		this.cachedText = this.text;
 		this.cachedWidth = width;
-		this.cachedLines = result;
+		this.cachedLines = trackSelectionLines(result);
 
-		return result.length > 0 ? result : [""];
+		return this.cachedLines.length > 0 ? this.cachedLines : [""];
 	}
 }

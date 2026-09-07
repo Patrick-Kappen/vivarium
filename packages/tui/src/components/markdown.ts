@@ -8,7 +8,13 @@ import {
 	composeVerticalSelection,
 	type VerticalSelectionPart,
 } from "../selection-compose.ts";
-import { type CopySource, getSelectionMap, joinSelectionMaps, setSelectionMap } from "../selection-map.ts";
+import {
+	type CopySource,
+	getSelectionMap,
+	joinSelectionMaps,
+	setSelectionMap,
+	trackSelectionLines,
+} from "../selection-map.ts";
 import { getCapabilities, hyperlink, isImageLine } from "../terminal-image.ts";
 import type { Component } from "../tui.ts";
 import { applyBackgroundToLine, visibleWidth, wrapTextWithAnsi } from "../utils.ts";
@@ -805,9 +811,9 @@ export class Markdown implements Component {
 		// Update cache
 		this.cachedText = this.text;
 		this.cachedWidth = width;
-		this.cachedLines = result;
+		this.cachedLines = trackSelectionLines(result);
 
-		return result.length > 0 ? result : [""];
+		return this.cachedLines.length > 0 ? this.cachedLines : [""];
 	}
 
 	/**

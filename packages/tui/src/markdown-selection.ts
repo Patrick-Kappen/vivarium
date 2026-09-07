@@ -8,6 +8,7 @@ import {
 	setSelectionMap,
 	textSelectionMap,
 } from "./selection-map.ts";
+import { reflowSelectionSpans } from "./selection-wrap.ts";
 import { isImageLine } from "./terminal-image.ts";
 import { stripTerminalSequences, visibleWidth, wrapTextWithAnsiRanges } from "./utils.ts";
 
@@ -175,29 +176,7 @@ export class MarkdownSelection {
 					// new source from the quote-prefixed text. Validate each block only once.
 					if (!inheritedMaps.has(block)) inheritedMaps.set(block, getSelectionMap(block));
 					const spans = inheritedMaps.get(block)?.[index];
-					return wrapped.ranges.map((range, fragment) => {
-						const start = visibleWidth(line.slice(0, range.start));
-						const end = visibleWidth(line.slice(0, range.end));
-						const last = fragment === wrapped.ranges.length - 1;
-						const next = visibleWidth(line.slice(0, wrapped.ranges[fragment + 1]?.start ?? line.length));
-						return spans?.flatMap((span) => {
-							if (span.columnStart === span.columnEnd) {
-								const anchor = last ? Math.min(span.columnStart, end) : span.columnStart;
-								if (anchor < start || anchor > end || (fragment > 0 && anchor === start && span.anchorBefore))
-									return [];
-								return [{ ...span, columnStart: anchor - start, columnEnd: anchor - start }];
-							}
-							// Recorded wrap gaps contain omitted whitespace. Keep only spans already
-							// declared as content, not unmarked continuation or quote padding.
-							if (span.columnStart >= end && span.columnEnd <= next) {
-								return [
-									{ ...span, columnStart: end - start, columnEnd: end - start, anchorBefore: end > start },
-								];
-							}
-							if (span.columnStart < start || span.columnEnd > end) return [];
-							return [{ ...span, columnStart: span.columnStart - start, columnEnd: span.columnEnd - start }];
-						});
-					});
+					return spans ? reflowSelectionSpans(line, wrapped.ranges, spans) : wrapped.ranges.map(() => undefined);
 				}
 				const plain = stripTerminalSequences(line);
 				const map = textSelectionMap(line, line, wrapped.ranges, 0, 0, width, { text: plain });

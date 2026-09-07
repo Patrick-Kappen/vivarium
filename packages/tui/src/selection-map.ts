@@ -48,6 +48,50 @@ interface SelectionRecord {
 }
 
 const records = new WeakMap<readonly string[], SelectionRecord>();
+const owned = new WeakSet<readonly string[]>();
+const tracked = new WeakMap<readonly string[], { valid: boolean }>();
+const snapshots = new WeakMap<readonly string[], { record?: SelectionRecord; lines: string[]; keys: string[] }>();
+
+/** Transfer a final engine-owned array; do not retain a writable raw alias. Legacy rewrites remain allowed. */
+export function trackSelectionLines(lines: string[]): string[] {
+	const state = { valid: true };
+	const changing = () => {
+		// Resolve a retained snapshot before a legacy rewrite can affect its lazy factory.
+		const snapshot = snapshots.get(proxy);
+		if (snapshot) getSelectionMap(snapshot.lines);
+		state.valid = false;
+	};
+	const proxy = new Proxy(lines, {
+		defineProperty(target, key, descriptor) {
+			changing();
+			return Reflect.defineProperty(target, key, descriptor);
+		},
+		deleteProperty(target, key) {
+			changing();
+			return Reflect.deleteProperty(target, key);
+		},
+		setPrototypeOf(target, prototype) {
+			changing();
+			return Reflect.setPrototypeOf(target, prototype);
+		},
+	});
+	tracked.set(proxy, state);
+	const record = records.get(lines);
+	if (record) records.set(proxy, record);
+	return proxy;
+}
+
+function validatedRecord(lines: readonly string[]): SelectionRecord | undefined {
+	const record = records.get(lines);
+	if (!record || owned.has(lines)) return record;
+	const state = tracked.get(lines);
+	if (state) return state.valid ? record : undefined;
+	// Unknown mutable output is validated at the composition boundary. Hot reads
+	// use the owned snapshot instead, which cannot change behind its metadata.
+	return lines.length === record.lines.length && record.lines.every((line, index) => line === lines[index])
+		? record
+		: undefined;
+}
 
 /** Bind lazy metadata to this exact render result, not to mutable component state. */
 export function setSelectionMap(lines: string[], build: () => SelectionMap | undefined): void {
@@ -55,36 +99,49 @@ export function setSelectionMap(lines: string[], build: () => SelectionMap | und
 }
 
 export function getSelectionMap(lines: readonly string[]): SelectionMap | undefined {
-	const record = records.get(lines);
+	const record = validatedRecord(lines);
 	if (!record) return undefined;
-	// Legacy wrappers may mutate a child's output instead of returning a new array.
-	if (lines.length !== record.lines.length || record.lines.some((line, index) => line !== lines[index]))
-		return undefined;
 	record.resolved ??= { map: record.build() };
 	return record.resolved.map;
 }
 
 /** Own the painted array while retaining the metadata factory of this render, not a later one. */
 export function snapshotSelectionLines(lines: readonly string[]): string[] {
-	const record = records.get(lines);
-	const snapshot: string[] = record ? [...lines] : new Array(lines.length);
-	// Legacy renderers can return enormous sparse arrays. Do not expand their holes.
-	if (!record)
-		for (const key of Object.getOwnPropertyNames(lines)) {
-			const index = Number(key);
-			if (Number.isInteger(index) && index >= 0 && index < lines.length && String(index) === key)
-				snapshot[index] = lines[index]!;
+	if (owned.has(lines)) return lines as string[];
+	const record = validatedRecord(lines);
+	const previous = snapshots.get(lines);
+	if (previous && previous.record === record) {
+		if (tracked.get(lines)?.valid) return previous.lines;
+		const keys = previous.keys;
+		if (
+			previous.lines.length === lines.length &&
+			(keys.length === lines.length || Object.getOwnPropertyNames(lines).length === keys.length + 1) &&
+			keys.every((key) => Object.hasOwn(lines, key) && lines[Number(key)] === previous.lines[Number(key)])
+		)
+			return previous.lines;
+	}
+	const snapshot: string[] = new Array(lines.length);
+	const keys: string[] = [];
+	// Preserve sparse rows without expanding holes or trusting a replaced iterator.
+	for (const key of Object.getOwnPropertyNames(lines)) {
+		const index = Number(key);
+		if (Number.isInteger(index) && index >= 0 && index < lines.length && String(index) === key) {
+			snapshot[index] = lines[index]!;
+			keys.push(key);
 		}
-	if (
-		record &&
-		snapshot.length === record.lines.length &&
-		record.lines.every((line, index) => line === snapshot[index])
-	) {
-		setSelectionMap(snapshot, () => {
-			record.resolved ??= { map: record.build() };
-			return record.resolved.map;
+	}
+	if (record && (tracked.get(lines)?.valid || record.lines.every((line, index) => line === snapshot[index]))) {
+		records.set(snapshot, {
+			lines: snapshot,
+			build: () => {
+				record.resolved ??= { map: record.build() };
+				return record.resolved.map;
+			},
 		});
 	}
+	Object.freeze(snapshot);
+	owned.add(snapshot);
+	snapshots.set(lines, { record, lines: snapshot, keys });
 	return snapshot;
 }
 

@@ -1,4 +1,5 @@
 import { composeVerticalSelection, type VerticalSelectionPart } from "../selection-compose.ts";
+import { snapshotSelectionLines, trackSelectionLines } from "../selection-map.ts";
 import { type Component, dispatchMouseEvent, type TuiMouseDispatchResult, type TuiMouseEvent } from "../tui.ts";
 import { applyBackgroundToLine, visibleWidth } from "../utils.ts";
 
@@ -113,7 +114,7 @@ export class Box implements Component {
 		const parts: VerticalSelectionPart[] = [];
 		const mouseChildren: Array<{ component: Component; height: number }> = [];
 		for (const child of this.children) {
-			const lines = child.render(contentWidth);
+			const lines = snapshotSelectionLines(child.render(contentWidth));
 			parts.push({ lines, row: this.paddingY + childLines.length, column: this.paddingX, width: contentWidth });
 			mouseChildren.push({ component: child, height: lines.length });
 			for (const line of lines) {
@@ -147,9 +148,10 @@ export class Box implements Component {
 		}
 		composeVerticalSelection(result, parts);
 
-		this.cache = { childLines, childSnapshots: parts.map((part) => part.lines), width, bgSample, lines: result };
+		const lines = trackSelectionLines(result);
+		this.cache = { childLines, childSnapshots: parts.map((part) => part.lines), width, bgSample, lines };
 
-		return result;
+		return lines;
 	}
 
 	private applyBg(line: string, width: number): string {

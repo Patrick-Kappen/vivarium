@@ -1,7 +1,7 @@
 import { getScrollbarGeometry, type LayoutBox, type LayoutFrame } from "./layout.ts";
 import { getLayoutNode } from "./layout-node.ts";
 import { projectSelectionPart } from "./selection-compose.ts";
-import { type CopySpan, getSelectionMap, type SelectionMap } from "./selection-map.ts";
+import { type CopySpan, getSelectionMap, type SelectionMap, snapshotSelectionLines } from "./selection-map.ts";
 
 /** Project the layout's painted leaves; allocated padding and scrollbar cells have no source. */
 export function getViewportSelectionMap(frame: LayoutFrame): SelectionMap | undefined {
@@ -37,13 +37,23 @@ export function getViewportSelectionMap(frame: LayoutFrame): SelectionMap | unde
 	return mapped ? rows : undefined;
 }
 
+// Keep only the latest clip for each source snapshot, not a cache entry for every resize.
+const clippedMaps = new WeakMap<
+	readonly string[],
+	{ map: SelectionMap; left: number; right: number; result: SelectionMap }
+>();
+
 /** A partially visible pane must not recover its horizontally hidden text between selected rows. */
 export function getClippedSelectionMap(
 	lines: readonly string[],
 	left: number,
 	right: number,
 ): SelectionMap | undefined {
-	if (getSelectionMap(lines) === undefined) return undefined;
+	lines = snapshotSelectionLines(lines);
+	const map = getSelectionMap(lines);
+	if (map === undefined) return undefined;
+	const cached = clippedMaps.get(lines);
+	if (cached?.map === map && cached.left === left && cached.right === right) return cached.result;
 	const rows: CopySpan[][] = Array.from({ length: lines.length }, () => []);
 	projectSelectionPart(rows, {
 		lines,
@@ -53,5 +63,6 @@ export function getClippedSelectionMap(
 		flow: "clip",
 		clip: { x: left, y: 0, width: Math.max(0, right - left), height: lines.length },
 	});
+	clippedMaps.set(lines, { map, left, right, result: rows });
 	return rows;
 }

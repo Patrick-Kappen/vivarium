@@ -74,6 +74,10 @@ a billion-row sparse regression protects the clipped-viewport rendering path.
 
 Selections are cleared on width changes, changes to selected source mappings,
 removal of the selected scroll view or appearance/disappearance of an overlay.
+Overlay-backed selections also compare selected displayed rows while the stack
+remains non-empty: replacing, updating or uncovering another overlay must not
+reinterpret old coordinates against new text. Styling-only and unrelated-row
+changes preserve the selection.
 Scrolling and unrelated appends preserve unchanged selected blocks. Mutated legacy
 render arrays, text-rewriting background callbacks and glyphs too wide for the
 viewport fall back rather than receiving guessed mappings. This is an internal
@@ -90,6 +94,31 @@ Tests in `../test/wrap-source-ranges.test.ts` cover exact source offsets, explic
 newlines/blank lines, omitted wrap spaces, styling, tabs before expansion and
 wide/combining/emoji graphemes. Existing wrapping tests remain the independent
 render-output regression check.
+
+### Review hardening
+
+Layout snapshots are frozen internal arrays and reused across frames. Text,
+Markdown and Box return mutation-tracked arrays: legacy wrappers may still write
+into them, but any rewrite invalidates inherited metadata. Before a rewrite, an
+existing retained snapshot resolves its old lazy factory so its source cannot
+change behind it. Internal owned snapshots have constant-time metadata lookups.
+Unknown mutable arrays are still checked at the composition boundary, including
+sparse/deleted rows; they are not optimistically trusted by array identity.
+
+Horizontally clipped selection maps cache one projection per source snapshot and
+clip bounds, shared by validation, highlighting and copying. A changed source or
+clip recomputes the projection. This removes repeated whole-transcript projection
+within and across unchanged frames; the initial projection still visits the source.
+
+Nested Markdown reflow advances through recorded string boundaries once and
+indexes spans into candidate fragments instead of scanning every span for every
+fragment. This preserves original span ordering, gap anchors and clipping, with
+linear string work and logarithmic fragment lookup per span. Regression tests in
+`../test/selection-review-regressions.test.ts` exercise 100,000 cached Text rows,
+10,000 wrap fragments, overlay transitions and mutation safety.
+`../test/selection-wrap.test.ts` compares reflow with the prior clipping semantics.
+These are bounded hot-path fixes, not a claim that all legacy component rendering
+or initial large-transcript map allocation is viewport-sized.
 
 ### Markdown coverage
 

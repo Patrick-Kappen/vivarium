@@ -1492,7 +1492,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 			const b = next.map?.[row];
 			if (a === undefined && b === undefined) {
 				if (
-					mapped &&
+					(mapped || previous.overlay || next.overlay) &&
 					stripTerminalSequences(previous.lines[row] ?? "") !== stripTerminalSequences(next.lines[row] ?? "")
 				) {
 					this.clearTextSelection();
