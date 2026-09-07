@@ -5,10 +5,13 @@ import {
 	Markdown,
 	type MarkdownTheme,
 	preserveSelection,
+	type SelectionMessage,
+	setSelectionMessage,
 } from "@earendil-works/pi-tui";
 import type { MarkdownTransformer, MessageDecorator } from "../../../core/extensions/types.ts";
 import { getMarkdownTheme, theme } from "../theme/theme.ts";
 import { createMarkdownTransform } from "./markdown-transform.ts";
+import { messageSelectionLabel } from "./message-selection-label.ts";
 
 const OSC133_ZONE_START = "\x1b]133;A\x07";
 const OSC133_ZONE_END = "\x1b]133;B\x07";
@@ -24,6 +27,7 @@ export class UserMessageComponent extends Container {
 	private markdownTransformers: readonly MarkdownTransformer[];
 	private messageDecorators: readonly MessageDecorator[];
 	private timestamp: number | undefined;
+	private readonly selectionMessage: SelectionMessage;
 
 	constructor(
 		text: string,
@@ -40,6 +44,7 @@ export class UserMessageComponent extends Container {
 		this.markdownTransformers = markdownTransformers;
 		this.messageDecorators = messageDecorators;
 		this.timestamp = timestamp;
+		this.selectionMessage = { label: messageSelectionLabel("user", timestamp) };
 		this.rebuild();
 	}
 
@@ -92,6 +97,7 @@ export class UserMessageComponent extends Container {
 		lines[0] = OSC133_ZONE_START + lines[0];
 		lines[lines.length - 1] = OSC133_ZONE_END + OSC133_ZONE_FINAL + lines[lines.length - 1];
 		preserveSelection(lines, content, { row: 0, column: 0, width });
+		setSelectionMessage(lines, this.selectionMessage);
 		return lines;
 	}
 }

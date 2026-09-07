@@ -1506,6 +1506,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 					const other = b?.[index];
 					return (
 						!other ||
+						span.source.message !== other.source.message ||
 						(span.source !== other.source &&
 							!(span.source.legacy && other.source.legacy && span.source.text === other.source.text)) ||
 						span.breakBefore !== other.breakBefore ||

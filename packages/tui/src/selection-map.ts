@@ -1,3 +1,4 @@
+import type { SelectionMessage } from "./selection-message.ts";
 import {
 	extractAnsiCode,
 	getGraphemeSegmenter,
@@ -10,6 +11,7 @@ import {
 // Internal prototype, deliberately not exported from the package entrypoint.
 export interface CopySource {
 	readonly text: string;
+	readonly message?: SelectionMessage;
 	/** An explicitly positioned legacy row still trims selected trailing whitespace. */
 	readonly legacy?: boolean;
 }
@@ -318,12 +320,22 @@ export function selectionText(
 		}
 	}
 	flush();
-	const text = chunks
-		.map((chunk) => {
-			const text = chunk.source ? chunk.source.text.slice(chunk.start, chunk.end) : chunk.text!;
-			return chunk.separator + (chunk.source?.legacy ? text.trimEnd() : text);
-		})
-		.join("");
+	const parts = chunks.map((chunk) => {
+		const text = chunk.source ? chunk.source.text.slice(chunk.start, chunk.end) : chunk.text!;
+		return { ...chunk, text: chunk.source?.legacy ? text.trimEnd() : text };
+	});
+	const messages = new Set(parts.filter((part) => part.text.length > 0).map((part) => part.source?.message));
+	messages.delete(undefined);
+	let previousMessage: SelectionMessage | undefined;
+	let text = "";
+	for (const part of parts) {
+		const message = part.source?.message;
+		if (messages.size > 1 && message && !messages.has(message)) continue;
+		if (messages.size > 1 && message !== previousMessage) {
+			text += (text.length ? "\n\n" : "") + (message ? `${message.label}\n\n` : "") + part.text;
+		} else text += part.separator + part.text;
+		previousMessage = message;
+	}
 	return text.length ? text : undefined;
 }
 

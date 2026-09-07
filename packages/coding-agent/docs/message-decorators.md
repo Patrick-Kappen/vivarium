@@ -74,6 +74,24 @@ calls/results, custom extension messages, skill invocation blocks and summary
 components are not decorated. Any separately displayed user text following a
 skill invocation is decorated using that user message's original timestamp.
 
+## Copying across messages
+
+Fullscreen application-owned selection within a single user or assistant message
+copies only the selected content. When selected content spans multiple messages,
+the engine prefixes each message's selected portion with `USER` or `AGENT`, its
+original local `HH:mm` time when valid, and a blank line. Message portions are
+separated by a blank line. Missing timestamps are omitted, never invented.
+Distinct messages remain distinct even when their role and minute match.
+
+Attribution is attached by the outer message component, so existing decorators
+need no changes beyond preserving selection metadata. It is independent of
+whether a decorator displays a header or timestamp. Selecting only a frame's
+empty decoration does not count as selecting that message. Partial endpoint
+messages still copy only their selected text; hidden thinking is not restored.
+Single-message code copying remains free of headers. Session data, exports and
+native/Shift terminal selection are unchanged. Standalone tool/custom components
+are not assigned an inferred user or assistant identity.
+
 Removing an extension and reloading rebuilds the transcript without its
 wrappers. No decoration is persisted. With no decorator, rendering follows the
 existing component path unchanged.

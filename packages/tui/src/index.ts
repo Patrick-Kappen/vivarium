@@ -79,6 +79,7 @@ export { type RenderLatexOptions, renderLatex } from "./latex.ts";
 export { getNativeClipboard, type NativeClipboard } from "./native-platform.ts";
 // Forward selection through a decoration-only wrapper.
 export { preserveSelection } from "./preserve-selection.ts";
+export { type SelectionMessage, setSelectionMessage } from "./selection-message.ts";
 // Input buffering for batch splitting
 export { StdinBuffer, type StdinBufferEventMap, type StdinBufferOptions } from "./stdin-buffer.ts";
 // Terminal interface and implementations

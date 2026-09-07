@@ -139,6 +139,98 @@ for (const useFrame of [false, true])
 		});
 	});
 
+for (const useFrame of [false, true])
+	for (const reverse of [false, true])
+		test(`attributes multiple chat messages without copying frames (frame=${useFrame}, reverse=${reverse})`, async () => {
+			initTheme("dark");
+			const decorators = useFrame ? [framed] : [];
+			const timestamp = new Date(2026, 8, 7, 14, 32).getTime();
+			const root = new Container();
+			root.addChild(new UserMessageComponent("question", undefined, 0, [], decorators, timestamp));
+			const answer = {
+				...fauxAssistantMessage("```text\n\talpha beta gamma delta  \n```"),
+				timestamp: timestamp + 60_000,
+			};
+			root.addChild(new AssistantMessageComponent(answer, true, undefined, "Thinking...", 0, [], decorators));
+			await chat(root, async (tui, terminal, copied) => {
+				const height = root.render(terminal.columns).length;
+				if (reverse) {
+					terminal.sendInput(`\x1b[<0;${terminal.columns};${height}M`);
+					terminal.sendInput("\x1b[<32;1;1M");
+					terminal.sendInput("\x1b[<0;1;1m");
+					tui.renderNow();
+				} else selectAll(root, tui, terminal);
+				expect(await tui.copyActiveSelectionToClipboard()).toBe(true);
+				expect(copied).toEqual(["USER 14:32\n\nquestion\n\nAGENT 14:33\n\n\talpha beta gamma delta  "]);
+			});
+		});
+
+test("partial framed endpoints omit unselected text and decoration-only endpoints add no header", async () => {
+	initTheme("dark");
+	const root = new Container();
+	const user = new UserMessageComponent("ignore alpha", undefined, 0, [], [framed]);
+	root.addChild(user);
+	root.addChild(
+		new AssistantMessageComponent(
+			{ ...fauxAssistantMessage("beta ignore"), timestamp: Number.NaN },
+			true,
+			undefined,
+			"Thinking...",
+			0,
+			[],
+			[framed],
+		),
+	);
+	await chat(root, async (tui, terminal, copied) => {
+		const lines = root.render(terminal.columns).map(stripTerminalSequences);
+		const first = lines.findIndex((line) => line.includes("ignore alpha")) + 1;
+		const last = lines.findIndex((line) => line.includes("beta ignore")) + 1;
+		terminal.sendInput(`\x1b[<0;9;${first}M`);
+		terminal.sendInput(`\x1b[<32;5;${last}M`);
+		terminal.sendInput(`\x1b[<0;5;${last}m`);
+		tui.renderNow();
+		expect(await tui.copyActiveSelectionToClipboard()).toBe(true);
+		expect(copied.pop()).toBe("USER\n\nalpha\n\nAGENT\n\nbeta");
+		const footer = user.render(terminal.columns).length;
+		terminal.sendInput(`\x1b[<0;1;${footer}M`);
+		terminal.sendInput(`\x1b[<32;24;${lines.length}M`);
+		terminal.sendInput(`\x1b[<0;24;${lines.length}m`);
+		tui.renderNow();
+		expect(await tui.copyActiveSelectionToClipboard()).toBe(true);
+		expect(copied.pop()).toBe("beta ignore");
+	});
+});
+
+test("assistant text preceding tool calls retains attribution without adding terminal zones", async () => {
+	initTheme("dark");
+	const root = new Container();
+	root.addChild(new UserMessageComponent("question", undefined, 0));
+	const answer = { ...fauxAssistantMessage("answer"), timestamp: Number.NaN };
+	answer.content.push({ type: "toolCall", id: "call-1", name: "read", arguments: { path: "example" } });
+	const assistant = new AssistantMessageComponent(answer, true, undefined, "Thinking...", 0);
+	root.addChild(assistant);
+	await chat(root, async (tui, terminal, copied) => {
+		selectAll(root, tui, terminal);
+		expect(await tui.copyActiveSelectionToClipboard()).toBe(true);
+		expect(copied).toEqual(["USER\n\nquestion\n\nAGENT\n\nanswer"]);
+		expect(assistant.render(24).join("")).not.toContain("\x1b]133;");
+	});
+});
+
+test("missing timestamps do not invent a time and hidden thinking is never restored", async () => {
+	initTheme("dark");
+	const root = new Container();
+	root.addChild(new UserMessageComponent("question", undefined, 0, [], [framed]));
+	const answer = { ...fauxAssistantMessage("answer"), timestamp: Number.NaN };
+	answer.content.unshift({ type: "thinking", thinking: "PRIVATE" });
+	root.addChild(new AssistantMessageComponent(answer, true, undefined, "Thinking...", 0, [], [framed]));
+	await chat(root, async (tui, terminal, copied) => {
+		selectAll(root, tui, terminal);
+		expect(await tui.copyActiveSelectionToClipboard()).toBe(true);
+		expect(copied).toEqual(["USER\n\nquestion\n\nAGENT\n\nThinking...\nanswer"]);
+	});
+});
+
 test("invalidates a changed streamed selection and copies the final visible answer", async () => {
 	initTheme("dark");
 	const component = new AssistantMessageComponent(
