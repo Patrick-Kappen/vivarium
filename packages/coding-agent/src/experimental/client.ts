@@ -82,24 +82,57 @@ export async function runClient(command: ClientCommand, options: RunClientOption
 		const agent = match.agent;
 		const completedText = new Map<string, string>();
 		let deliveryTail = Promise.resolve();
+		const terminalRuns = new Set<string>();
+		let operationId: string | undefined;
+		let complete!: () => void;
+		let fail!: (error: unknown) => void;
+		const delivered = new Promise<void>((resolve, reject) => {
+			complete = resolve;
+			fail = reject;
+		});
+		// Delivery or disconnect can fail before the RPC response arrives.
+		void delivered.catch(() => {});
+		const stopConnection = match.client.onConnectionStateChange((change) => {
+			if (change.state === "disconnected")
+				fail(change.error ?? new Error("Disconnected before prompt delivery completed"));
+		});
+		const stopAttachment = match.client.onAttachmentChange((attachment) => {
+			if (attachment?.sessionId !== sessionId) fail(new Error("Session detached before prompt delivery completed"));
+		});
 		const unsubscribe = match.transcript.state.subscribe((value, _context, delivery) => {
 			if (delivery.kind !== "update" || value.event === null) return;
 			const event = value.event;
-			deliveryTail = deliveryTail.then(async () => {
-				if (event.type === "message_end" && event.runId !== undefined && event.message.role === "assistant") {
-					completedText.set(event.runId, messageText(event.message));
-				}
-				await options.onEvent?.(event);
-			});
+			deliveryTail = deliveryTail
+				.then(async () => {
+					if (event.type === "message_end" && event.runId !== undefined && event.message.role === "assistant") {
+						completedText.set(event.runId, messageText(event.message));
+					}
+					await options.onEvent?.(event);
+					if (event.type === "run_end" || event.type === "run_suspend") {
+						terminalRuns.add(event.runId);
+						if (event.runId === operationId) complete();
+					}
+				})
+				.catch(fail);
 		});
 		if (match.transcript.state.value?.snapshot === null || match.transcript.state.value?.snapshot === undefined) {
 			unsubscribe();
+			stopConnection();
+			stopAttachment();
 			throw new Error("Transcript has no initialized snapshot");
 		}
 		let response: AgentOperationResponse;
 		try {
 			response = await agent.prompt({ message: command.prompt, images: null }, BACKGROUND_CONTEXT);
+			if (response.accepted) {
+				operationId = response.operationId;
+				if (terminalRuns.has(operationId)) complete();
+				// The RPC result does not drain the independently queued transcript stream.
+				await delivered;
+			}
 		} finally {
+			stopConnection();
+			stopAttachment();
 			unsubscribe();
 			await deliveryTail;
 		}
