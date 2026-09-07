@@ -5,6 +5,7 @@ import {
 	Markdown,
 	type MarkdownTheme,
 	MouseRegion,
+	preserveSelection,
 	Spacer,
 	Text,
 } from "@earendil-works/pi-tui";
@@ -53,6 +54,7 @@ export class AssistantMessageComponent extends Container {
 		this.contentContainer = new Container();
 		const component = this;
 		const context = {
+			preserveSelection,
 			role: "assistant" as const,
 			get timestamp() {
 				return component.lastMessage?.timestamp;
@@ -106,13 +108,13 @@ export class AssistantMessageComponent extends Container {
 	}
 
 	override render(width: number): string[] {
-		const lines = super.render(width);
-		if (this.hasToolCalls || lines.length === 0) {
-			return lines;
-		}
+		const content = super.render(width);
+		if (this.hasToolCalls || content.length === 0) return content;
+		const lines = [...content];
 
 		lines[0] = OSC133_ZONE_START + lines[0];
 		lines[lines.length - 1] = OSC133_ZONE_END + OSC133_ZONE_FINAL + lines[lines.length - 1];
+		preserveSelection(lines, content, { row: 0, column: 0, width });
 		return lines;
 	}
 

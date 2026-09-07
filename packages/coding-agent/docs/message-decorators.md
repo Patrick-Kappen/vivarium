@@ -34,6 +34,18 @@ The decorator receives a `Component` and `MessageDecorationContext`:
   time for unknown historical time.
 - `isStreaming`: live assistant streaming state; false for users.
 - `theme`: current theme, resolved lazily.
+- `preserveSelection(output, content, { row, column, width })`: forward the
+  unchanged rendered content rectangle into a decorated output array. Call after
+  drawing the wrapper; offsets and width are terminal cells. Cells outside this
+  rectangle are decoration. The engine validates visible content and retains
+  legacy copying if the wrapper rewrites or clips it. Do not mutate `content`.
+  This helper does not expose source maps or intercept clipboard transport.
+
+For a one-cell border with one header row, render the child at `width - 2`,
+then call `context.preserveSelection(result, childLines,
+{ row: 1, column: 1, width: width - 2 })`. Plain pass-through output needs no
+helper call. Older engines lack this context member; resources may feature-test
+it to retain legacy rendering without claiming source-aware copying.
 
 Read live context properties during `render()`, not only in the factory. A
 streaming assistant may have no timestamp until its first `updateContent()`.

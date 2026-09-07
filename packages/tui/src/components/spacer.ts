@@ -1,3 +1,4 @@
+import { setSelectionMap } from "../selection-map.ts";
 import type { Component } from "../tui.ts";
 
 /**
@@ -23,6 +24,7 @@ export class Spacer implements Component {
 		for (let i = 0; i < this.lines; i++) {
 			result.push("");
 		}
+		setSelectionMap(result, () => result.map(() => []));
 		return result;
 	}
 }

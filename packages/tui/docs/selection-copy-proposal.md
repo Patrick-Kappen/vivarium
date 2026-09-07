@@ -1,9 +1,9 @@
 # Source-aware fullscreen selection (proposal)
 
-Status: draft internal Text and layout/fullscreen integration. Text, Box, VStack
-and HStack forward source metadata. Basic Markdown emission is now mapped, but
-lexer provenance and extension integration remain unfinished.
-No public selection API is exported.
+Status: experimental source-aware Text, layout, supported Markdown and ordinary
+user/assistant message integration. The existing message-frame decorator can
+forward one unchanged content rectangle with `context.preserveSelection`.
+Raw selection maps remain internal; no general extension source-map API is exposed.
 Baseline: Vivarium `d0e76d057` (merged Pi 0.85.1 synchronization).
 
 ## Implementation progress
@@ -256,6 +256,24 @@ The existing general separator/occlusion and public API limitations still apply.
 `../test/markdown-nested-provenance.test.ts` adds 23 nested-source/view regressions. Existing Markdown
 render tests remain the independent check that presentation is unchanged. All of
 the remaining cases must be addressed before claiming complete message copying.
+
+### Ordinary chat checkpoint
+
+User and assistant components preserve metadata when adding their OSC133 zones,
+and Spacer rows are known decoration. The message decorator context supplies a
+single rectangle-forwarding helper: the child is rendered once, the wrapper
+paints its frame, and the engine validates/forwards the unchanged body. Headers,
+timestamps and side/bottom borders stay outside the copy source. Rewriting or
+clipping the body falls back rather than exposing hidden original content.
+
+`message-selection.test.ts` checks real user/assistant components in both themes,
+with and without decoration, including wrapped code, tabs/tails, hidden thinking,
+click toggling and streaming invalidation. A separate local paired smoke test
+uses the actual `message-frames` 1.0.2 resource, not just a test decorator.
+Custom/tool renderers retain their existing scoped legacy behavior when they do
+not forward metadata. Unsupported Markdown cases remain explicit fallback;
+this checkpoint does not promise arbitrary source-map extensions or native
+terminal selection parity.
 
 ## Scope and ownership
 

@@ -1,4 +1,11 @@
-import { Box, type Component, Container, Markdown, type MarkdownTheme } from "@earendil-works/pi-tui";
+import {
+	Box,
+	type Component,
+	Container,
+	Markdown,
+	type MarkdownTheme,
+	preserveSelection,
+} from "@earendil-works/pi-tui";
 import type { MarkdownTransformer, MessageDecorator } from "../../../core/extensions/types.ts";
 import { getMarkdownTheme, theme } from "../theme/theme.ts";
 import { createMarkdownTransform } from "./markdown-transform.ts";
@@ -61,6 +68,7 @@ export class UserMessageComponent extends Container {
 			),
 		);
 		const context = {
+			preserveSelection,
 			role: "user" as const,
 			timestamp: this.timestamp,
 			isStreaming: false,
@@ -77,13 +85,13 @@ export class UserMessageComponent extends Container {
 	}
 
 	override render(width: number): string[] {
-		const lines = super.render(width);
-		if (lines.length === 0) {
-			return lines;
-		}
+		const content = super.render(width);
+		if (content.length === 0) return content;
+		const lines = [...content];
 
 		lines[0] = OSC133_ZONE_START + lines[0];
 		lines[lines.length - 1] = OSC133_ZONE_END + OSC133_ZONE_FINAL + lines[lines.length - 1];
+		preserveSelection(lines, content, { row: 0, column: 0, width });
 		return lines;
 	}
 }
