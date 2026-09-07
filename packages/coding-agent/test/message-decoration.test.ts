@@ -145,7 +145,7 @@ describe("message decoration", () => {
 			clickCount: 1,
 		};
 		expect(component.handleMouse(event)?.handled).toBe(true);
-		expect(stripAnsi(component.render(40).join("\n"))).toContain("Thinking...");
+		expect(stripAnsi(component.render(40).join("\n"))).toContain("Thinking (hidden)");
 		component.setHiddenThinkingLabel("Hidden");
 		expect(stripAnsi(component.render(40).join("\n"))).toContain("Hidden");
 		component.setHideThinkingBlock(false);

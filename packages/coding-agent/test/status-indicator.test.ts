@@ -8,6 +8,7 @@ import {
 	WorkingStatusIndicator,
 } from "../src/modes/interactive/components/status-indicator.ts";
 import { getEditorTheme, initTheme, theme } from "../src/modes/interactive/theme/theme.ts";
+import { WorkingActivity } from "../src/modes/interactive/working-activity.ts";
 import { stripAnsi } from "../src/utils/ansi.ts";
 
 describe("status indicators", () => {
@@ -59,6 +60,27 @@ describe("status indicators", () => {
 		expect(visibleWidth(topBorder)).toBe(20);
 		expect(topBorder.split(theme.getFgAnsi("thinkingHigh"))).toHaveLength(5);
 		indicator.dispose();
+	});
+
+	it("updates activity time inside the editor border and stays within narrow widths", () => {
+		initTheme("dark");
+		vi.useFakeTimers();
+		let now = 0;
+		const tui = { requestRender: vi.fn(), terminal: { rows: 10 } } as unknown as TUI;
+		const editor = new CustomEditor(tui, getEditorTheme(), KeybindingsManager.create(), { embedWorkingStatus: true });
+		const indicator = new WorkingStatusIndicator(tui, "Working");
+		indicator.setActivity(new WorkingActivity(() => now));
+		editor.setWorkingStatusIndicator(indicator);
+		try {
+			expect(stripAnsi(editor.render(80)[0]!)).toContain("Waiting for model (0s)");
+			now = 12000;
+			vi.advanceTimersByTime(12000);
+			expect(stripAnsi(editor.render(80)[0]!)).toContain("Waiting for model (12s)");
+			for (const width of [8, 16, 24, 80]) expect(visibleWidth(editor.render(width)[0]!)).toBeLessThanOrEqual(width);
+		} finally {
+			indicator.dispose();
+		}
+		expect(vi.getTimerCount()).toBe(0);
 	});
 
 	it("disposes retry countdown updates", () => {

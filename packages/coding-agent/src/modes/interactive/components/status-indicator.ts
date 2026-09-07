@@ -1,6 +1,7 @@
 import { type Component, Loader, type TUI, truncateToWidth } from "@earendil-works/pi-tui";
 import type { WorkingIndicatorOptions } from "../../../core/extensions/index.ts";
 import { theme } from "../theme/theme.ts";
+import type { WorkingActivity } from "../working-activity.ts";
 import { CountdownTimer } from "./countdown-timer.ts";
 import { keyText } from "./keybinding-hints.ts";
 
@@ -27,6 +28,36 @@ export class StatusIndicator extends Loader {
 }
 
 export class WorkingStatusIndicator extends StatusIndicator {
+	private activity: WorkingActivity | undefined;
+	private activityTimer: ReturnType<typeof setInterval> | undefined;
+	private activitySuffix = "";
+	private activityText: string | undefined;
+
+	setActivity(activity: WorkingActivity | undefined, suffix = ""): void {
+		clearInterval(this.activityTimer);
+		this.activityTimer = undefined;
+		this.activity = activity;
+		this.activitySuffix = suffix;
+		this.activityText = undefined;
+		if (activity) {
+			this.refreshActivity();
+			this.activityTimer = setInterval(() => this.refreshActivity(), 1000);
+		}
+	}
+
+	refreshActivity(): void {
+		if (!this.activity) return;
+		const text = this.activity.message() + this.activitySuffix;
+		if (text === this.activityText) return;
+		this.activityText = text;
+		this.setMessage(text);
+	}
+
+	override dispose(): void {
+		this.setActivity(undefined);
+		super.dispose();
+	}
+
 	constructor(ui: TUI, message: string, indicator?: WorkingIndicatorOptions, colorFn?: (text: string) => string) {
 		super(
 			"working",
