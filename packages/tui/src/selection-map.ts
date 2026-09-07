@@ -169,15 +169,21 @@ export function legacySelectionRow(line: string): readonly CopySpan[] {
 
 export function joinSelectionMaps(lines: string[], children: readonly string[][]): void {
 	if (!children.some((child) => records.has(child))) return;
+	const inputs = children.map(snapshotSelectionLines);
 	setSelectionMap(lines, () => {
 		const rows: (readonly CopySpan[] | undefined)[] = [];
-		let mapped = false;
-		for (const [index, child] of children.entries()) {
-			const map = getSelectionMap(child);
-			mapped ||= map !== undefined;
-			let firstContent = true;
-			for (let row = 0; row < child.length; row++) {
-				const spans = map?.[row]?.map((span) =>
+		for (const [index, child] of inputs.entries()) {
+			let map: SelectionMap | undefined;
+			let ready = false;
+			let boundaryRow = 0;
+			let firstContentRow: number | undefined;
+			const resolve = (row: number): readonly CopySpan[] | undefined => {
+				if (!ready) {
+					map = getSelectionMap(child);
+					ready = true;
+				}
+				if (!map) return undefined;
+				const spans = map[row]?.map((span) =>
 					span.readingOrder
 						? {
 								...span,
@@ -188,13 +194,31 @@ export function joinSelectionMaps(lines: string[], children: readonly string[][]
 							}
 						: span,
 				);
-				if (firstContent && spans?.length) {
-					rows.push([{ ...spans[0]!, breakBefore: true }, ...spans.slice(1)]);
-					firstContent = false;
-				} else rows.push(spans);
+				if (spans?.length && !spans[0]!.breakBefore) {
+					// Only inspect the boundary prefix when it is not already marked.
+					while (firstContentRow === undefined && boundaryRow <= row) {
+						if (map[boundaryRow]?.length) firstContentRow = boundaryRow;
+						boundaryRow++;
+					}
+					if (firstContentRow === row) return [{ ...spans[0]!, breakBefore: true }, ...spans.slice(1)];
+				}
+				return spans;
+			};
+			// Resolving the transcript must not resolve every historical message.
+			// Array accessors retain normal slice/map/iteration and readonly semantics.
+			for (let row = 0; row < child.length; row++) {
+				let cached: { spans: readonly CopySpan[] | undefined } | undefined;
+				Object.defineProperty(rows, rows.length, {
+					enumerable: true,
+					configurable: true,
+					get: () => {
+						cached ??= { spans: resolve(row) };
+						return cached.spans;
+					},
+				});
 			}
 		}
-		return mapped ? rows : undefined;
+		return rows;
 	});
 }
 

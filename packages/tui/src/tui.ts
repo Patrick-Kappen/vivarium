@@ -4,7 +4,7 @@
 
 import { performance } from "node:perf_hooks";
 import { isKeyRelease, matchesKey } from "./keys.ts";
-import { joinSelectionMaps } from "./selection-map.ts";
+import { joinSelectionMaps, snapshotSelectionLines, trackSelectionLines } from "./selection-map.ts";
 import type { Terminal } from "./terminal.ts";
 import {
 	isOsc11BackgroundColorResponse,
@@ -320,6 +320,13 @@ type OverlayFocusRestorePolicy = "clear" | "preserve";
 export class Container implements Component {
 	children: Component[] = [];
 	private mouseLayout?: { width: number; children: Array<{ component: Component; height: number }> };
+	private selectionRenderCache?: {
+		width: number;
+		components: Component[];
+		inputs: string[][];
+		output: string[];
+		snapshot: string[];
+	};
 
 	addChild(component: Component): void {
 		this.children.push(component);
@@ -337,6 +344,7 @@ export class Container implements Component {
 	}
 
 	invalidate(): void {
+		this.selectionRenderCache = undefined;
 		for (const child of this.children) {
 			child.invalidate?.();
 		}
@@ -369,16 +377,32 @@ export class Container implements Component {
 		const mouseChildren: Array<{ component: Component; height: number }> = [];
 		const renderedChildren: string[][] = [];
 		for (const child of this.children) {
-			const childLines = child.render(width);
+			const childLines = snapshotSelectionLines(child.render(width));
 			renderedChildren.push(childLines);
 			mouseChildren.push({ component: child, height: childLines.length });
-			for (const line of childLines) {
-				lines.push(line);
-			}
 		}
 		this.mouseLayout = { width, children: mouseChildren };
+		const cached = this.selectionRenderCache;
+		if (
+			cached?.width === width &&
+			cached.inputs.length === renderedChildren.length &&
+			renderedChildren.every(
+				(input, index) => input === cached.inputs[index] && this.children[index] === cached.components[index],
+			) &&
+			snapshotSelectionLines(cached.output) === cached.snapshot
+		)
+			return cached.output;
+		for (const childLines of renderedChildren) for (const line of childLines) lines.push(line);
 		joinSelectionMaps(lines, renderedChildren);
-		return lines;
+		const output = trackSelectionLines(lines);
+		this.selectionRenderCache = {
+			width,
+			components: [...this.children],
+			inputs: renderedChildren,
+			output,
+			snapshot: snapshotSelectionLines(output),
+		};
+		return output;
 	}
 }
 
