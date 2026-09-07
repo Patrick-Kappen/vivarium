@@ -6,12 +6,15 @@ import {
 	type MarkdownTheme,
 	MouseRegion,
 	preserveSelection,
+	type SelectionMessage,
 	Spacer,
+	setSelectionMessage,
 	Text,
 } from "@earendil-works/pi-tui";
 import type { MarkdownTransformer, MessageDecorator } from "../../../core/extensions/types.ts";
 import { getMarkdownTheme, theme } from "../theme/theme.ts";
 import { createMarkdownTransform } from "./markdown-transform.ts";
+import { messageSelectionLabel } from "./message-selection-label.ts";
 
 const OSC133_ZONE_START = "\x1b]133;A\x07";
 const OSC133_ZONE_END = "\x1b]133;B\x07";
@@ -28,6 +31,7 @@ export class AssistantMessageComponent extends Container {
 	private outputPad: number;
 	private markdownTransformers: readonly MarkdownTransformer[];
 	private lastMessage?: AssistantMessage;
+	private selectionMessage: SelectionMessage = { label: "AGENT" };
 	private hasToolCalls = false;
 	private isStreaming = false;
 	private thinkingVisibilityOverrides = new Map<number, boolean>();
@@ -109,18 +113,23 @@ export class AssistantMessageComponent extends Container {
 
 	override render(width: number): string[] {
 		const content = super.render(width);
-		if (this.hasToolCalls || content.length === 0) return content;
+		if (content.length === 0) return content;
 		const lines = [...content];
 
-		lines[0] = OSC133_ZONE_START + lines[0];
-		lines[lines.length - 1] = OSC133_ZONE_END + OSC133_ZONE_FINAL + lines[lines.length - 1];
+		if (!this.hasToolCalls) {
+			lines[0] = OSC133_ZONE_START + lines[0];
+			lines[lines.length - 1] = OSC133_ZONE_END + OSC133_ZONE_FINAL + lines[lines.length - 1];
+		}
 		preserveSelection(lines, content, { row: 0, column: 0, width });
+		setSelectionMessage(lines, this.selectionMessage);
 		return lines;
 	}
 
 	updateContent(message: AssistantMessage, isStreaming = this.isStreaming): void {
 		this.lastMessage = message;
 		this.isStreaming = isStreaming;
+		const label = messageSelectionLabel("assistant", message.timestamp);
+		if (label !== this.selectionMessage.label) this.selectionMessage = { label };
 
 		// Clear content container
 		this.contentContainer.clear();
