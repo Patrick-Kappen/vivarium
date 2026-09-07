@@ -1208,6 +1208,12 @@ export type MarkdownTransformer = (markdown: string, context: MarkdownTransformC
 
 /** Live presentation metadata. Read inside render() to observe streaming and theme changes. */
 export interface MessageDecorationContext {
+	/** Forward unchanged rendered content at this rectangle; surrounding cells are decoration. */
+	readonly preserveSelection: (
+		output: string[],
+		content: readonly string[],
+		placement: { row: number; column: number; width: number },
+	) => void;
 	readonly role: "user" | "assistant";
 	/** Original message time in Unix milliseconds; absent for standalone components. */
 	readonly timestamp: number | undefined;

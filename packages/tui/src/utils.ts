@@ -841,7 +841,29 @@ function splitIntoTokensWithAnsi(text: string): string[] {
  * @returns Array of wrapped lines (NOT padded to width)
  */
 export function wrapTextWithAnsi(text: string, width: number): string[] {
+	return wrapTextWithAnsiInternal(text, width);
+}
+
+/** Input offsets for one visual line, excluding whitespace removed by wrapping. */
+export interface WrappedSourceRange {
+	start: number;
+	end: number;
+}
+
+/** Internal selection primitive; offsets refer to the unchanged input, including ANSI. */
+export function wrapTextWithAnsiRanges(text: string, width: number): { lines: string[]; ranges: WrappedSourceRange[] } {
+	const ranges: WrappedSourceRange[] = [];
+	const lines = wrapTextWithAnsiInternal(text, width, (start, end) => ranges.push({ start, end }));
+	return { lines, ranges };
+}
+
+function wrapTextWithAnsiInternal(
+	text: string,
+	width: number,
+	onLine?: (start: number, end: number) => void,
+): string[] {
 	if (!text) {
+		onLine?.(0, 0);
 		return [""];
 	}
 
@@ -850,39 +872,60 @@ export function wrapTextWithAnsi(text: string, width: number): string[] {
 	const inputLines = text.split(/\r\n|\r|\n/);
 	const result: string[] = [];
 	const tracker = new AnsiCodeTracker();
+	let sourceOffset = 0;
 
 	for (const inputLine of inputLines) {
 		// Prepend active ANSI codes from previous lines (except for first line)
 		const prefix = result.length > 0 ? tracker.getActiveCodes() : "";
-		const wrappedLines = wrapSingleLine(prefix + inputLine, width);
+		const wrappedLines = wrapSingleLine(
+			prefix + inputLine,
+			width,
+			onLine
+				? (start, end) =>
+						onLine(
+							sourceOffset + Math.max(0, start - prefix.length),
+							sourceOffset + Math.max(0, end - prefix.length),
+						)
+				: undefined,
+		);
 		for (const wrappedLine of wrappedLines) {
 			result.push(wrappedLine);
 		}
 		// Update tracker with codes from this line for next iteration
 		updateTrackerFromText(inputLine, tracker);
+		sourceOffset += inputLine.length;
+		sourceOffset += text.startsWith("\r\n", sourceOffset) ? 2 : 1;
 	}
 
 	return result.length > 0 ? result : [""];
 }
 
-function wrapSingleLine(line: string, width: number): string[] {
+function wrapSingleLine(line: string, width: number, onLine?: (start: number, end: number) => void): string[] {
 	if (!line) {
+		onLine?.(0, 0);
 		return [""];
 	}
 
 	const visibleLength = visibleWidth(line);
 	if (visibleLength <= width) {
+		onLine?.(0, line.length);
 		return [line];
 	}
 
 	const wrapped: string[] = [];
+	const ranges: WrappedSourceRange[] | undefined = onLine ? [] : undefined;
 	const tracker = new AnsiCodeTracker();
 	const tokens = splitIntoTokensWithAnsi(line);
 
 	let currentLine = "";
 	let currentVisibleLength = 0;
+	let currentStart = 0;
+	let currentEnd = 0;
+	let tokenOffset = 0;
 
 	for (const token of tokens) {
+		const tokenStart = tokenOffset;
+		tokenOffset += token.length;
 		const tokenVisibleLength = visibleWidth(token);
 		const isWhitespace = token.trim() === "";
 
@@ -895,16 +938,28 @@ function wrapSingleLine(line: string, width: number): string[] {
 					currentLine += lineEndReset;
 				}
 				wrapped.push(currentLine);
+				ranges?.push({ start: currentStart, end: currentEnd });
 				currentLine = "";
 				currentVisibleLength = 0;
 			}
 
 			// Break long token - breakLongWord handles its own resets
-			const broken = breakLongWord(token, width, tracker);
+			const brokenRanges: WrappedSourceRange[] | undefined = ranges ? [] : undefined;
+			const broken = breakLongWord(
+				token,
+				width,
+				tracker,
+				brokenRanges
+					? (start, end) => brokenRanges.push({ start: tokenStart + start, end: tokenStart + end })
+					: undefined,
+			);
 			for (let i = 0; i < broken.length - 1; i++) {
 				wrapped.push(broken[i]!);
+				if (brokenRanges) ranges?.push(brokenRanges[i]!);
 			}
 			currentLine = broken[broken.length - 1];
+			currentStart = brokenRanges?.[broken.length - 1]?.start ?? tokenStart;
+			currentEnd = tokenOffset;
 			currentVisibleLength = visibleWidth(currentLine);
 			continue;
 		}
@@ -915,23 +970,30 @@ function wrapSingleLine(line: string, width: number): string[] {
 		if (totalNeeded > width && currentVisibleLength > 0) {
 			// Trim trailing whitespace, then add underline reset (not full reset, to preserve background)
 			let lineToWrap = currentLine.trimEnd();
+			const trimmedEnd = Math.max(currentStart, currentEnd - (currentLine.length - lineToWrap.length));
 			const lineEndReset = tracker.getLineEndReset();
 			if (lineEndReset) {
 				lineToWrap += lineEndReset;
 			}
 			wrapped.push(lineToWrap);
+			ranges?.push({ start: currentStart, end: trimmedEnd });
 			if (isWhitespace) {
 				// Don't start new line with whitespace
 				currentLine = tracker.getActiveCodes();
 				currentVisibleLength = 0;
+				currentStart = tokenOffset;
+				currentEnd = tokenOffset;
 			} else {
 				currentLine = tracker.getActiveCodes() + token;
 				currentVisibleLength = tokenVisibleLength;
+				currentStart = tokenStart;
+				currentEnd = tokenOffset;
 			}
 		} else {
 			// Add to current line
 			currentLine += token;
 			currentVisibleLength += tokenVisibleLength;
+			currentEnd = tokenOffset;
 		}
 
 		updateTrackerFromText(token, tracker);
@@ -940,10 +1002,20 @@ function wrapSingleLine(line: string, width: number): string[] {
 	if (currentLine) {
 		// No reset at end of final line - let caller handle it
 		wrapped.push(currentLine);
+		ranges?.push({ start: currentStart, end: currentEnd });
 	}
 
-	// Trailing whitespace can cause lines to exceed the requested width
-	return wrapped.length > 0 ? wrapped.map((line) => line.trimEnd()) : [""];
+	// Trailing whitespace can cause lines to exceed the requested width.
+	if (wrapped.length === 0) {
+		onLine?.(0, 0);
+		return [""];
+	}
+	return wrapped.map((line, index) => {
+		const trimmed = line.trimEnd();
+		const range = ranges?.[index];
+		if (range) onLine?.(range.start, Math.max(range.start, range.end - (line.length - trimmed.length)));
+		return trimmed;
+	});
 }
 
 export const PUNCTUATION_REGEX = /[(){}[\]<>.,;:'"!?+\-=*/\\|&%^$#@~`]/;
@@ -962,7 +1034,12 @@ export function isPunctuationChar(char: string): boolean {
 	return PUNCTUATION_REGEX.test(char);
 }
 
-function breakLongWord(word: string, width: number, tracker: AnsiCodeTracker): string[] {
+function breakLongWord(
+	word: string,
+	width: number,
+	tracker: AnsiCodeTracker,
+	onLine?: (start: number, end: number) => void,
+): string[] {
 	const lines: string[] = [];
 	let currentLine = tracker.getActiveCodes();
 	let currentWidth = 0;
@@ -994,9 +1071,13 @@ function breakLongWord(word: string, width: number, tracker: AnsiCodeTracker): s
 		}
 	}
 
+	// Record source boundaries while emitting, before synthetic style carry/reset codes.
+	let sourceOffset = 0;
+	let lineStart = 0;
 	// Now process segments
 	for (const seg of segments) {
 		if (seg.type === "ansi") {
+			sourceOffset += seg.value.length;
 			currentLine += seg.value;
 			tracker.process(seg.value);
 			continue;
@@ -1015,19 +1096,24 @@ function breakLongWord(word: string, width: number, tracker: AnsiCodeTracker): s
 				currentLine += lineEndReset;
 			}
 			lines.push(currentLine);
+			onLine?.(lineStart, sourceOffset);
+			lineStart = sourceOffset;
 			currentLine = tracker.getActiveCodes();
 			currentWidth = 0;
 		}
 
 		currentLine += grapheme;
 		currentWidth += graphemeWidth;
+		sourceOffset += grapheme.length;
 	}
 
 	if (currentLine) {
 		// No reset at end of final segment - caller handles continuation
 		lines.push(currentLine);
+		onLine?.(lineStart, sourceOffset);
 	}
 
+	if (lines.length === 0) onLine?.(0, 0);
 	return lines.length > 0 ? lines : [""];
 }
 

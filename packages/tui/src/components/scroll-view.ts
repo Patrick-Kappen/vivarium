@@ -1,4 +1,5 @@
 import { LAYOUT_NODE, type ScrollLayoutNode } from "../layout-node.ts";
+import { composeVerticalSelection } from "../selection-compose.ts";
 import { type Component, Container } from "../tui.ts";
 
 export type ScrollViewScrollbar = "hidden" | "auto" | "always";
@@ -215,7 +216,10 @@ export class ScrollView extends Container {
 	override render(width: number): string[] {
 		const contentWidth = this.getContentWidth(width);
 		const lines = this.child.render(contentWidth);
-		return contentWidth === width ? lines : lines.map((line) => `${line} `);
+		if (contentWidth === width) return lines;
+		const result = lines.map((line) => `${line} `);
+		composeVerticalSelection(result, [{ lines, row: 0, column: 0, width: contentWidth }]);
+		return result;
 	}
 
 	[LAYOUT_NODE](): ScrollLayoutNode {

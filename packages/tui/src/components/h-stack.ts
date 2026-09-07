@@ -1,3 +1,4 @@
+import { composeHorizontalSelection, type VerticalSelectionPart } from "../selection-compose.ts";
 import { compositeTuiLine } from "../tui.ts";
 import { visibleWidth } from "../utils.ts";
 import { allocateStackSizes, Stack, type StackChild, type StackOptions, visibleStackEntries } from "./stack.ts";
@@ -25,6 +26,7 @@ export class HStack extends Stack {
 		);
 		const height = rendered.reduce((max, lines) => Math.max(max, lines.length), 0);
 		const result = Array.from({ length: height }, () => "");
+		const parts: VerticalSelectionPart[] = [];
 		let x = 0;
 		for (let index = 0; index < rendered.length; index++) {
 			const lines = rendered[index]!;
@@ -32,6 +34,7 @@ export class HStack extends Stack {
 			let offset = 0;
 			if (this.align === "center") offset = Math.floor((height - lines.length) / 2);
 			else if (this.align === "end") offset = height - lines.length;
+			parts.push({ lines, row: offset, column: x, width: childWidth });
 			for (let row = 0; row < lines.length; row++) {
 				const target = row + offset;
 				if (target < 0 || target >= result.length) continue;
@@ -39,6 +42,7 @@ export class HStack extends Stack {
 			}
 			x += childWidth + this.gap;
 		}
+		composeHorizontalSelection(result, parts, safeWidth);
 		return result;
 	}
 }

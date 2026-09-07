@@ -1,4 +1,4 @@
-import { type Component, Text } from "@earendil-works/pi-tui";
+import { type Component, preserveSelection, Text } from "@earendil-works/pi-tui";
 import { expect, test, vi } from "vitest";
 import { AuthStorage } from "../src/core/auth-storage.ts";
 import { createEventBus } from "../src/core/event-bus.ts";
@@ -70,7 +70,7 @@ test("registers one decorator per extension, chains in load order and isolates f
 	const errors: string[] = [];
 	runner.onError((error) => errors.push(`${error.extensionPath}: ${error.error}`));
 	const content = new Text("content", 0, 0);
-	const context = { role: "user" as const, timestamp: 1, isStreaming: false, theme };
+	const context = { role: "user" as const, timestamp: 1, isStreaming: false, theme, preserveSelection };
 	let decorated: Component = content;
 	for (const decorate of runner.getMessageDecorators()) {
 		decorated = decorate(decorated, context) ?? decorated;

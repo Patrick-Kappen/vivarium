@@ -1,12 +1,272 @@
 import { Marked, type Token, Tokenizer, type TokenizerExtension, type Tokens } from "marked";
 import { renderLatex } from "../latex.ts";
+import { MarkdownSelection } from "../markdown-selection.ts";
+import { MarkdownSource } from "../markdown-source.ts";
+import { type MarkdownSourceText, MarkdownSourceView } from "../markdown-source-view.ts";
+import {
+	composeHorizontalSelection,
+	composeVerticalSelection,
+	type VerticalSelectionPart,
+} from "../selection-compose.ts";
+import {
+	type CopySource,
+	getSelectionMap,
+	joinSelectionMaps,
+	setSelectionMap,
+	trackSelectionLines,
+} from "../selection-map.ts";
 import { getCapabilities, hyperlink, isImageLine } from "../terminal-image.ts";
 import type { Component } from "../tui.ts";
 import { applyBackgroundToLine, visibleWidth, wrapTextWithAnsi } from "../utils.ts";
 
 const STRICT_STRIKETHROUGH_REGEX = /^(~~)(?=[^\s~])((?:\\.|[^\\])*?(?:\\.|[^\s~\\]))\1(?=[^~]|$)/;
 
+interface CodeBody {
+	ranges: { start: number; end: number }[];
+	text: string;
+}
+
+const codeBodies = new WeakMap<Token, CodeBody>();
+const blockBodies = new WeakMap<object, CodeBody>();
+
+function sliceBodyRanges(ranges: CodeBody["ranges"], start: number, end: number): CodeBody["ranges"] {
+	let offset = 0;
+	return ranges.flatMap((range) => {
+		const from = Math.max(0, start - offset);
+		const to = Math.min(range.end - range.start, end - offset);
+		offset += range.end - range.start;
+		return to > from ? [{ start: range.start + from, end: range.start + to }] : [];
+	});
+}
+const paragraphBodies = new WeakMap<Token, { start: number; end: number; text: string }>();
+const inlineBodies = new WeakMap<Token, { start: number; end: number; text: string; newlinesAsSpaces: boolean }>();
+let captureOriginalSources = false;
+
+function recordCodeBody(token: Tokens.Code, ranges: CodeBody["ranges"]): void {
+	// Validate the declared lexical removals against the actual token, before styling.
+	if (ranges.map(({ start, end }) => token.raw.slice(start, end)).join("") === token.text)
+		codeBodies.set(token, { ranges, text: token.text });
+}
+
 class StrictStrikethroughTokenizer extends Tokenizer {
+	override fences(src: string): Tokens.Code | undefined {
+		const token = super.fences(src);
+		if (token && captureOriginalSources) {
+			const rule = this.rules.block.fences;
+			const capture = new RegExp(rule.source, rule.hasIndices ? rule.flags : `${rule.flags}d`).exec(src);
+			const body = capture?.indices?.[3];
+			// Record the same per-line indentation compensation as the installed lexer.
+			// Both expressions come from its rules; the resulting text is validated below.
+			if (body) {
+				const indent = this.rules.other.indentCodeCompensation.exec(token.raw)?.[1]?.length ?? 0;
+				if (indent === 0) {
+					recordCodeBody(token, [{ start: body[0], end: body[1] }]);
+					return token;
+				}
+				const ranges: CodeBody["ranges"] = [];
+				let start = body[0];
+				for (const line of src.slice(body[0], body[1]).split("\n")) {
+					const spaces = this.rules.other.beginningSpace.exec(line)?.[0]?.length ?? 0;
+					const end = Math.min(body[1], start + line.length + 1);
+					ranges.push({ start: start + (spaces >= indent ? indent : 0), end });
+					start = end;
+				}
+				recordCodeBody(token, ranges);
+			}
+		}
+		return token;
+	}
+
+	override code(src: string): Tokens.Code | undefined {
+		const token = super.code(src);
+		if (token && captureOriginalSources) {
+			const ranges: CodeBody["ranges"] = [];
+			let start = 0;
+			for (const match of token.raw.matchAll(this.rules.other.codeRemoveIndent)) {
+				ranges.push({ start, end: match.index });
+				start = match.index + match[0].length;
+			}
+			ranges.push({ start, end: token.raw.length });
+			recordCodeBody(token, ranges);
+		}
+		return token;
+	}
+
+	override blockquote(src: string): Tokens.Blockquote | undefined {
+		const token = super.blockquote(src);
+		if (token && captureOriginalSources) {
+			const ranges: CodeBody["ranges"] = [];
+			let start = 0;
+			for (const match of token.raw.matchAll(this.rules.other.blockquoteSetextReplace2)) {
+				ranges.push({ start, end: match.index });
+				start = match.index + match[0].length;
+			}
+			ranges.push({ start, end: token.raw.length });
+			if (ranges.map(({ start, end }) => token.raw.slice(start, end)).join("") === token.text)
+				blockBodies.set(token, { ranges, text: token.text });
+		}
+		return token;
+	}
+
+	override list(src: string): Tokens.List | undefined {
+		const token = super.list(src);
+		if (token && captureOriginalSources && !this.options.pedantic) {
+			for (const item of token.items) {
+				const marker = this.rules.block.list.exec(item.raw)?.[1];
+				if (!marker || item.raw.includes("\t")) continue;
+				const lines = item.raw.split("\n");
+				const first = lines[0]!.slice(marker.length);
+				const blank = !first.trim();
+				let removed = blank ? first.length : first.search(this.rules.other.nonSpaceChar);
+				if (!blank && removed > 4) removed = 1;
+				const indent = marker.length + (blank ? 1 : removed);
+				let start = 0;
+				let ranges: CodeBody["ranges"] = [];
+				for (const [index, line] of lines.entries()) {
+					const prefix =
+						index === 0
+							? marker.length + removed
+							: line.search(this.rules.other.nonSpaceChar) >= indent || !line.trim()
+								? Math.min(indent, line.length)
+								: 0;
+					const end = Math.min(item.raw.length, start + line.length + 1);
+					ranges.push({ start: start + prefix, end });
+					start = end;
+				}
+				const candidate = ranges.map(({ start, end }) => item.raw.slice(start, end)).join("");
+				const end =
+					item === token.items.at(-1)
+						? candidate.trimEnd().length
+						: candidate.length - (candidate.endsWith("\n") ? 1 : 0);
+				const prefix = item.task ? (this.rules.other.listReplaceTask.exec(candidate)?.[0].length ?? 0) : 0;
+				ranges = sliceBodyRanges(ranges, prefix, end);
+				if (ranges.map(({ start, end }) => item.raw.slice(start, end)).join("") === item.text)
+					blockBodies.set(item, { ranges, text: item.text });
+			}
+		}
+		return token;
+	}
+
+	override paragraph(src: string): Tokens.Paragraph | undefined {
+		const token = super.paragraph(src);
+		if (token && captureOriginalSources) {
+			const rule = this.rules.block.paragraph;
+			const capture = new RegExp(rule.source, rule.hasIndices ? rule.flags : `${rule.flags}d`).exec(src);
+			const body = capture?.indices?.[1];
+			if (body) {
+				const end = body[1] - (src[body[1] - 1] === "\n" ? 1 : 0);
+				if (src.slice(body[0], end) === token.text)
+					paragraphBodies.set(token, { start: body[0], end, text: token.text });
+			}
+		}
+		return token;
+	}
+
+	override escape(src: string): Tokens.Escape | undefined {
+		const token = super.escape(src);
+		if (token && captureOriginalSources) {
+			const rule = this.rules.inline.escape;
+			const capture = new RegExp(rule.source, rule.hasIndices ? rule.flags : `${rule.flags}d`).exec(src);
+			const body = capture?.indices?.[1];
+			if (body && src.slice(body[0], body[1]) === token.text)
+				inlineBodies.set(token, { start: body[0], end: body[1], text: token.text, newlinesAsSpaces: false });
+		}
+		return token;
+	}
+
+	override codespan(src: string): Tokens.Codespan | undefined {
+		const token = super.codespan(src);
+		if (token && captureOriginalSources) {
+			const rule = this.rules.inline.code;
+			const capture = new RegExp(rule.source, rule.hasIndices ? rule.flags : `${rule.flags}d`).exec(src);
+			const body = capture?.indices?.[2];
+			if (body) {
+				let [start, end] = body;
+				const text = src.slice(start, end).replace(this.rules.other.newLineCharGlobal, " ");
+				if (
+					this.rules.other.nonSpaceChar.test(text) &&
+					this.rules.other.startingSpaceChar.test(text) &&
+					this.rules.other.endingSpaceChar.test(text)
+				) {
+					start++;
+					end--;
+				}
+				if (src.slice(start, end).replace(this.rules.other.newLineCharGlobal, " ") === token.text)
+					inlineBodies.set(token, { start, end, text: token.text, newlinesAsSpaces: true });
+			}
+		}
+		return token;
+	}
+
+	override br(src: string): Tokens.Br | undefined {
+		const token = super.br(src);
+		if (token && captureOriginalSources && token.raw.endsWith("\n"))
+			inlineBodies.set(token, {
+				start: token.raw.length - 1,
+				end: token.raw.length,
+				text: "\n",
+				newlinesAsSpaces: false,
+			});
+		return token;
+	}
+
+	override link(src: string): Tokens.Link | Tokens.Image | undefined {
+		const token = super.link(src);
+		if (token?.type === "link" && captureOriginalSources) {
+			const rule = this.rules.inline.link;
+			const capture = new RegExp(rule.source, rule.hasIndices ? rule.flags : `${rule.flags}d`).exec(src);
+			const body = capture?.indices?.[1];
+			// Label unescaping is a separate lexer transformation; do not infer its offsets.
+			if (body && src.slice(body[0], body[1]) === token.text)
+				inlineBodies.set(token, { start: body[0], end: body[1], text: token.text, newlinesAsSpaces: false });
+		}
+		return token;
+	}
+
+	override reflink(
+		src: string,
+		links: Parameters<Tokenizer["reflink"]>[1],
+	): Tokens.Link | Tokens.Image | Tokens.Text | undefined {
+		const token = super.reflink(src, links);
+		if (token?.type === "link" && captureOriginalSources) {
+			for (const rule of [this.rules.inline.reflink, this.rules.inline.nolink]) {
+				const capture = new RegExp(rule.source, rule.hasIndices ? rule.flags : `${rule.flags}d`).exec(src);
+				if (!capture) continue;
+				const body = capture.indices?.[1];
+				if (body && src.slice(body[0], body[1]) === token.text)
+					inlineBodies.set(token, { start: body[0], end: body[1], text: token.text, newlinesAsSpaces: false });
+				break;
+			}
+		}
+		return token;
+	}
+
+	override autolink(src: string): Tokens.Link | undefined {
+		const token = super.autolink(src);
+		if (token && captureOriginalSources && token.raw.slice(1, -1) === token.text)
+			inlineBodies.set(token, { start: 1, end: token.raw.length - 1, text: token.text, newlinesAsSpaces: false });
+		return token;
+	}
+
+	override url(src: string): Tokens.Link | undefined {
+		const token = super.url(src);
+		if (token && captureOriginalSources && token.raw === token.text)
+			inlineBodies.set(token, { start: 0, end: token.raw.length, text: token.text, newlinesAsSpaces: false });
+		return token;
+	}
+
+	override emStrong(src: string, maskedSrc: string, prevChar = ""): Tokens.Em | Tokens.Strong | undefined {
+		const token = super.emStrong(src, maskedSrc, prevChar);
+		if (token && captureOriginalSources) {
+			// These are the exact body slices used by the installed emphasis tokenizer.
+			const start = token.type === "strong" ? 2 : 1;
+			const end = token.raw.length - start;
+			if (token.raw.slice(start, end) === token.text)
+				inlineBodies.set(token, { start, end, text: token.text, newlinesAsSpaces: false });
+		}
+		return token;
+	}
+
 	override del(src: string): Tokens.Del | undefined {
 		const match = STRICT_STRIKETHROUGH_REGEX.exec(src);
 		if (!match) {
@@ -14,13 +274,159 @@ class StrictStrikethroughTokenizer extends Tokenizer {
 		}
 
 		const text = match[2];
-		return {
+		const token: Tokens.Del = {
 			type: "del",
 			raw: match[0],
 			text,
 			tokens: this.lexer.inlineTokens(text),
 		};
+		if (captureOriginalSources && token.raw.slice(2, -2) === text)
+			inlineBodies.set(token, { start: 2, end: token.raw.length - 2, text, newlinesAsSpaces: false });
+		return token;
 	}
+}
+
+interface OriginalBlock {
+	allowed: boolean;
+	code?: string | null;
+	paragraph?: string;
+}
+
+type OriginalBlocks = WeakMap<Token, OriginalBlock>;
+
+function traceBlockSources(
+	source: MarkdownSourceText,
+	tokens: readonly Token[],
+	records: OriginalBlocks,
+	preserveEscapes: boolean,
+): void {
+	let cursor = 0;
+	for (const token of tokens) {
+		const record: OriginalBlock = { allowed: token.type === "code", code: token.type === "code" ? null : undefined };
+		records.set(token, record);
+		if (token.type === "checkbox") continue;
+		// Missing or rewritten lexer regions stop source inheritance; never search ahead.
+		if (cursor < 0 || source.text.slice(cursor, cursor + token.raw.length) !== token.raw) {
+			cursor = -1;
+			continue;
+		}
+		const original = source.slice(cursor, cursor + token.raw.length);
+		if (original !== undefined && !/[\t\r]/.test(original)) {
+			record.allowed = true;
+			record.code = undefined;
+		}
+		const body = codeBodies.get(token);
+		if (body) {
+			const pieces = body.ranges.map(({ start, end }) => source.slice(cursor + start, cursor + end));
+			if (pieces.every((piece) => piece !== undefined)) record.code = pieces.join("");
+		}
+		const paragraph = paragraphBodies.get(token);
+		if ((token.type === "paragraph" || token.type === "text") && token.tokens) {
+			const start =
+				paragraph && paragraph.text === token.text
+					? paragraph.start
+					: token.type === "text" && (token.raw === token.text || token.raw === `${token.text}\n`)
+						? 0
+						: undefined;
+			if (start !== undefined)
+				record.paragraph = originalInlineText(source, cursor + start, token.text, token.tokens, preserveEscapes);
+			if (record.paragraph !== undefined) record.allowed = true;
+		}
+		if (token.type === "blockquote") {
+			const block = blockBodies.get(token);
+			if (block && block.text === token.text) {
+				const view = new MarkdownSourceView(
+					source,
+					block.ranges.map(({ start, end }) => ({ start: cursor + start, end: cursor + end })),
+				);
+				if (view.text === token.text && token.tokens) {
+					record.allowed = true;
+					traceBlockSources(view, token.tokens, records, preserveEscapes);
+				}
+			}
+		} else if (token.type === "list") {
+			let itemOffset = 0;
+			const views: { item: Tokens.ListItem; view: MarkdownSourceView }[] = [];
+			for (const item of token.items) {
+				const block = blockBodies.get(item);
+				if (
+					!block ||
+					block.text !== item.text ||
+					token.raw.slice(itemOffset, itemOffset + item.raw.length) !== item.raw
+				)
+					break;
+				const view = new MarkdownSourceView(
+					source,
+					block.ranges.map(({ start, end }) => ({
+						start: cursor + itemOffset + start,
+						end: cursor + itemOffset + end,
+					})),
+				);
+				if (view.text !== item.text) break;
+				views.push({ item, view });
+				itemOffset += item.raw.length;
+			}
+			if (views.length === token.items.length) {
+				record.allowed = true;
+				for (const { item, view } of views) traceBlockSources(view, item.tokens, records, preserveEscapes);
+			}
+		}
+		cursor += token.raw.length;
+	}
+}
+
+function visibleLinkSuffix(text: string, href: string): string {
+	if (getCapabilities().hyperlinks) return "";
+	const hrefForComparison = href.startsWith("mailto:") ? href.slice(7) : href;
+	return text === href || text === hrefForComparison ? "" : ` (${href})`;
+}
+
+function originalInlineText(
+	source: MarkdownSourceText,
+	start: number,
+	text: string,
+	tokens: readonly Token[],
+	preserveEscapes: boolean,
+): string | undefined {
+	const pieces: string[] = [];
+	let offset = 0;
+	for (const part of tokens) {
+		if (text.slice(offset, offset + part.raw.length) !== part.raw) return undefined;
+		if (part.type === "strong" || part.type === "em" || part.type === "del" || part.type === "link") {
+			const body = inlineBodies.get(part);
+			if (!body || body.text !== part.text || !part.tokens) return undefined;
+			const nested = originalInlineText(
+				source,
+				start + offset + body.start,
+				part.text,
+				part.tokens,
+				preserveEscapes,
+			);
+			if (nested === undefined) return undefined;
+			pieces.push(nested + (part.type === "link" ? visibleLinkSuffix(part.text, part.href) : ""));
+			offset += part.raw.length;
+			continue;
+		}
+		let range = { start: 0, end: part.raw.length, newlinesAsSpaces: false };
+		if (part.type === "text") {
+			if (part.tokens?.length || part.raw !== part.text) return undefined;
+		} else if (part.type === "br") {
+			const body = inlineBodies.get(part);
+			if (!body || body.text !== "\n") return undefined;
+			range = body;
+		} else if (part.type === "escape" || part.type === "codespan") {
+			const body = inlineBodies.get(part);
+			if (!body || body.text !== part.text) return undefined;
+			if (part.type !== "escape" || !preserveEscapes) range = body;
+		} else return undefined;
+		let original = source.slice(start + offset + range.start, start + offset + range.end);
+		if (original === undefined) return undefined;
+		// Inline-code newlines are displayed as spaces, not original source line breaks.
+		if (range.newlinesAsSpaces) original = original.replace(/\r\n|\r|\n/g, " ");
+		pieces.push(original);
+		offset += part.raw.length;
+	}
+	return offset === text.length ? pieces.join("") : undefined;
 }
 
 interface LatexToken extends Tokens.Generic {
@@ -165,7 +571,19 @@ function trimPartialClosingFences(tokens: readonly Token[]): void {
 		return;
 	}
 
+	const previousText = token.text;
 	token.text = token.text.slice(0, -lastLine.length).replace(/\n$/, "");
+	const body = codeBodies.get(token);
+	if (body && body.text === previousText) {
+		let remaining = token.text.length;
+		body.ranges = body.ranges.flatMap(({ start, end }) => {
+			if (remaining === 0) return [];
+			const length = Math.min(remaining, end - start);
+			remaining -= length;
+			return [{ start, end: start + length }];
+		});
+		body.text = token.text;
+	}
 }
 
 const markdownParser = new Marked();
@@ -246,6 +664,7 @@ export class Markdown implements Component {
 	private cachedText?: string;
 	private cachedWidth?: number;
 	private cachedLines?: string[];
+	private copySources: readonly CopySource[] = [];
 
 	constructor(
 		text: string,
@@ -287,6 +706,7 @@ export class Markdown implements Component {
 		// Don't render anything if there's no actual text
 		if (!text || text.trim() === "") {
 			const result: string[] = [];
+			this.copySources = [];
 			// Update cache
 			this.cachedText = this.text;
 			this.cachedWidth = width;
@@ -294,28 +714,51 @@ export class Markdown implements Component {
 			return result;
 		}
 
-		// Replace tabs with 3 spaces for consistent rendering
-		const normalizedText = text.replace(/\t/g, "   ");
+		const source = /[\t\r]/.test(text) ? new MarkdownSource(text) : undefined;
+		const normalizedText = source?.text ?? text;
 
-		// Parse markdown to HTML-like tokens
-		const tokens = markdownParser.lexer(normalizedText);
+		// Parse the same normalized input while retaining original-source captures.
+		const previousCapture = captureOriginalSources;
+		captureOriginalSources = source !== undefined;
+		let tokens: ReturnType<typeof markdownParser.lexer>;
+		try {
+			tokens = markdownParser.lexer(normalizedText);
+		} finally {
+			captureOriginalSources = previousCapture;
+		}
 		trimPartialClosingFences(tokens);
 
 		// Convert tokens to styled terminal output
 		const renderedLines: string[] = [];
-
+		const blocks: string[][] = [];
+		const collector = new MarkdownSelection(this.copySources);
+		let mapped = false;
+		const originals: OriginalBlocks | undefined = source ? new WeakMap() : undefined;
+		if (source && originals)
+			traceBlockSources(source, tokens, originals, this.options.preserveBackslashEscapes === true);
 		for (let i = 0; i < tokens.length; i++) {
 			const token = tokens[i];
 			const nextToken = tokens[i + 1];
-			const tokenLines = this.renderToken(token, contentWidth, nextToken?.type);
+			const tokenSelection = !originals || originals.get(token)?.allowed ? collector : undefined;
+			mapped ||= tokenSelection !== undefined;
+			const tokenLines = this.renderToken(
+				token,
+				contentWidth,
+				nextToken?.type,
+				undefined,
+				tokenSelection,
+				originals,
+			);
+			blocks.push(tokenLines);
 			for (const tokenLine of tokenLines) {
 				renderedLines.push(tokenLine);
 			}
 		}
 
+		const selection = mapped ? collector : undefined;
 		// Wrap lines (NO padding, NO background yet)
-		const wrappedLines: string[] = [];
-		for (const line of renderedLines) {
+		const wrappedLines: string[] = selection?.wrap(blocks, contentWidth) ?? [];
+		for (const line of selection ? [] : renderedLines) {
 			if (isImageLine(line)) {
 				wrappedLines.push(line);
 			} else {
@@ -359,13 +802,18 @@ export class Markdown implements Component {
 
 		// Combine top padding, content, and bottom padding
 		const result = emptyLines.concat(contentLines, emptyLines);
+		if (selection)
+			composeVerticalSelection(result, [
+				{ lines: wrappedLines, row: this.paddingY, column: this.paddingX, width: contentWidth },
+			]);
+		this.copySources = selection?.sources ?? [];
 
 		// Update cache
 		this.cachedText = this.text;
 		this.cachedWidth = width;
-		this.cachedLines = result;
+		this.cachedLines = trackSelectionLines(result);
 
-		return result.length > 0 ? result : [""];
+		return this.cachedLines.length > 0 ? this.cachedLines : [""];
 	}
 
 	/**
@@ -456,7 +904,11 @@ export class Markdown implements Component {
 		width: number,
 		nextTokenType?: string,
 		styleContext?: InlineStyleContext,
+		selection?: MarkdownSelection,
+		originals?: OriginalBlocks,
 	): string[] {
+		const original = originals?.get(token);
+		if (original && !original.allowed) selection = undefined;
 		const lines: string[] = [];
 
 		switch (token.type) {
@@ -482,8 +934,10 @@ export class Markdown implements Component {
 				const headingText = this.renderInlineTokens(token.tokens || [], headingStyleContext);
 				const styledHeading = headingLevel >= 3 ? headingStyleFn(headingPrefix) + headingText : headingText;
 				lines.push(styledHeading);
+				selection?.text(lines, 0, headingLevel >= 3 ? headingPrefix : "");
 				if (nextTokenType && nextTokenType !== "space") {
 					lines.push(""); // Add spacing after headings (unless space token follows)
+					selection?.decoration(lines, lines.length - 1);
 				}
 				break;
 			}
@@ -491,15 +945,18 @@ export class Markdown implements Component {
 			case "paragraph": {
 				const paragraphText = this.renderInlineTokens(token.tokens || [], styleContext);
 				lines.push(paragraphText);
+				selection?.text(lines, 0, "", original?.paragraph);
 				// Don't add spacing if next token is space or list
 				if (nextTokenType && nextTokenType !== "list" && nextTokenType !== "space") {
 					lines.push("");
+					selection?.decoration(lines, lines.length - 1);
 				}
 				break;
 			}
 
 			case "text":
 				lines.push(this.renderInlineTokens([token], styleContext));
+				selection?.text(lines, 0, "", original?.paragraph);
 				break;
 
 			case "latexBlock": {
@@ -510,9 +967,11 @@ export class Markdown implements Component {
 						: latexToken.raw.trim();
 				for (const line of rendered.split("\n")) {
 					lines.push(this.applyDefaultStyle(line));
+					selection?.text(lines, lines.length - 1);
 				}
 				if (nextTokenType && nextTokenType !== "space") {
 					lines.push("");
+					selection?.decoration(lines, lines.length - 1);
 				}
 				break;
 			}
@@ -533,23 +992,27 @@ export class Markdown implements Component {
 					}
 				}
 				lines.push(this.theme.codeBlockBorder("```"));
+				selection?.code(lines, token.text, indent, original?.code);
 				if (nextTokenType && nextTokenType !== "space") {
 					lines.push(""); // Add spacing after code blocks (unless space token follows)
+					selection?.decoration(lines, lines.length - 1);
 				}
 				break;
 			}
 
 			case "list": {
-				const listLines = this.renderList(token as Tokens.List, 0, width, styleContext);
+				const listLines = this.renderList(token as Tokens.List, 0, width, styleContext, selection, originals);
 				lines.push(...listLines);
+				if (selection) joinSelectionMaps(lines, [listLines]);
 				// Don't add spacing after lists if a space token follows
 				// (the space token will handle it)
 				break;
 			}
 
 			case "table": {
-				const tableLines = this.renderTable(token as Tokens.Table, width, nextTokenType, styleContext);
+				const tableLines = this.renderTable(token as Tokens.Table, width, nextTokenType, styleContext, selection);
 				lines.push(...tableLines);
+				if (selection) joinSelectionMaps(lines, [tableLines]);
 				break;
 			}
 
@@ -575,37 +1038,53 @@ export class Markdown implements Component {
 					stylePrefix: quoteStylePrefix,
 				};
 				const quoteTokens = token.tokens || [];
-				const renderedQuoteLines: string[] = [];
+				const quoteBlocks: string[][] = [];
 				for (let i = 0; i < quoteTokens.length; i++) {
-					const quoteToken = quoteTokens[i];
-					const nextQuoteToken = quoteTokens[i + 1];
-					renderedQuoteLines.push(
-						...this.renderToken(quoteToken, quoteContentWidth, nextQuoteToken?.type, quoteInlineStyleContext),
+					quoteBlocks.push(
+						this.renderToken(
+							quoteTokens[i],
+							quoteContentWidth,
+							quoteTokens[i + 1]?.type,
+							quoteInlineStyleContext,
+							selection,
+							originals,
+						),
 					);
 				}
-
-				// Avoid rendering an extra empty quote line before the outer blockquote spacing.
-				while (renderedQuoteLines.length > 0 && renderedQuoteLines[renderedQuoteLines.length - 1] === "") {
-					renderedQuoteLines.pop();
+				let wrappedQuote: string[];
+				const prefixes: string[] = [];
+				const recordPrefix = () => {
+					prefixes.push(this.theme.quoteBorder("│ "));
+				};
+				if (selection) {
+					wrappedQuote = selection.wrap(quoteBlocks, quoteContentWidth, {
+						style: applyQuoteStyle,
+						trimEmptyEnd: true,
+						onWrappedLine: recordPrefix,
+					});
+				} else {
+					const renderedQuoteLines = quoteBlocks.flat();
+					while (renderedQuoteLines.at(-1) === "") renderedQuoteLines.pop();
+					wrappedQuote = renderedQuoteLines.flatMap((line) => {
+						const wrapped = wrapTextWithAnsi(applyQuoteStyle(line), quoteContentWidth);
+						for (const _line of wrapped) recordPrefix();
+						return wrapped;
+					});
 				}
-
-				for (const quoteLine of renderedQuoteLines) {
-					const styledLine = applyQuoteStyle(quoteLine);
-					const wrappedLines = wrapTextWithAnsi(styledLine, quoteContentWidth);
-					for (const wrappedLine of wrappedLines) {
-						lines.push(this.theme.quoteBorder("│ ") + wrappedLine);
-					}
-				}
+				for (const [row, line] of wrappedQuote.entries()) lines.push(prefixes[row]! + line);
 				if (nextTokenType && nextTokenType !== "space") {
 					lines.push(""); // Add spacing after blockquotes (unless space token follows)
 				}
+				selection?.decoratePrefix(lines, wrappedQuote, prefixes);
 				break;
 			}
 
 			case "hr":
 				lines.push(this.theme.hr("─".repeat(Math.min(width, 80))));
+				selection?.decoration(lines, 0);
 				if (nextTokenType && nextTokenType !== "space") {
 					lines.push(""); // Add spacing after horizontal rules (unless space token follows)
+					selection?.decoration(lines, lines.length - 1);
 				}
 				break;
 
@@ -613,12 +1092,14 @@ export class Markdown implements Component {
 				// Render HTML as plain text (escaped for terminal)
 				if ("raw" in token && typeof token.raw === "string") {
 					lines.push(this.applyDefaultStyle(token.raw.trim()));
+					selection?.text(lines, 0);
 				}
 				break;
 
 			case "space":
 				// Space tokens represent blank lines in markdown
 				lines.push("");
+				selection?.text(lines, 0);
 				break;
 
 			default:
@@ -698,12 +1179,8 @@ export class Markdown implements Component {
 						// Compare raw token.text (not styled) against href for the equality check.
 						// For mailto: links strip the prefix (autolinked emails use text="foo@bar.com"
 						// but href="mailto:foo@bar.com").
-						const hrefForComparison = token.href.startsWith("mailto:") ? token.href.slice(7) : token.href;
-						if (token.text === token.href || token.text === hrefForComparison) {
-							result += styledLink + stylePrefix;
-						} else {
-							result += styledLink + this.theme.linkUrl(` (${token.href})`) + stylePrefix;
-						}
+						const suffix = visibleLinkSuffix(token.text, token.href);
+						result += styledLink + (suffix ? this.theme.linkUrl(suffix) : "") + stylePrefix;
 					}
 					break;
 				}
@@ -753,8 +1230,17 @@ export class Markdown implements Component {
 	/**
 	 * Render a list with proper nesting support
 	 */
-	private renderList(token: Tokens.List, depth: number, width: number, styleContext?: InlineStyleContext): string[] {
+	private renderList(
+		token: Tokens.List,
+		depth: number,
+		width: number,
+		styleContext?: InlineStyleContext,
+		selection?: MarkdownSelection,
+		originals?: OriginalBlocks,
+	): string[] {
+		if (originals?.get(token)?.allowed === false) selection = undefined;
 		const lines: string[] = [];
+		const blocks: string[][] = [];
 		const indent = "    ".repeat(depth);
 		// Use the list's start property (defaults to 1 for ordered lists)
 		const startNumber = typeof token.start === "number" ? token.start : 1;
@@ -778,30 +1264,62 @@ export class Markdown implements Component {
 
 			for (const itemToken of item.tokens) {
 				if (itemToken.type === "list") {
-					lines.push(...this.renderList(itemToken as Tokens.List, depth + 1, width, styleContext));
+					const nested = this.renderList(
+						itemToken as Tokens.List,
+						depth + 1,
+						width,
+						styleContext,
+						selection,
+						originals,
+					);
+					lines.push(...nested);
+					blocks.push(nested);
 					renderedAnyLine = true;
 					continue;
 				}
 
-				const itemLines = this.renderToken(itemToken, itemWidth, undefined, styleContext);
-				for (const line of itemLines) {
-					for (const wrappedLine of wrapTextWithAnsi(line, itemWidth)) {
-						const linePrefix = renderedAnyLine ? continuationPrefix : firstPrefix;
-						lines.push(linePrefix + wrappedLine);
-						renderedAnyLine = true;
+				const itemLines = this.renderToken(itemToken, itemWidth, undefined, styleContext, selection, originals);
+				if (selection) {
+					const first = !renderedAnyLine;
+					const prefixes: string[] = [];
+					const wrapped = selection.wrap([itemLines], itemWidth, {
+						wrapImages: true,
+						onWrappedLine: () => {
+							prefixes.push(renderedAnyLine ? continuationPrefix : firstPrefix);
+							renderedAnyLine = true;
+						},
+					});
+					const prefixed = wrapped.map((line, row) => prefixes[row]! + line);
+					selection.decoratePrefix(prefixed, wrapped, prefixes, first);
+					blocks.push(prefixed);
+					lines.push(...prefixed);
+				} else
+					for (const line of itemLines) {
+						for (const wrappedLine of wrapTextWithAnsi(line, itemWidth)) {
+							const linePrefix = renderedAnyLine ? continuationPrefix : firstPrefix;
+							lines.push(linePrefix + wrappedLine);
+							renderedAnyLine = true;
+						}
 					}
-				}
 			}
 
 			if (!renderedAnyLine) {
-				lines.push(firstPrefix);
+				const empty = [firstPrefix];
+				selection?.decoratePrefix(empty, [""], [firstPrefix], true);
+				blocks.push(empty);
+				lines.push(...empty);
 			}
 
 			if (token.loose && !isLastItem) {
-				lines.push("");
+				const gap = [""];
+				selection?.text(gap, 0);
+				const rendered = selection?.wrap([gap], width) ?? gap;
+				blocks.push(rendered);
+				lines.push(...rendered);
 			}
 		}
 
+		if (selection) joinSelectionMaps(lines, blocks);
 		return lines;
 	}
 
@@ -826,13 +1344,18 @@ export class Markdown implements Component {
 	 * Delegates to wrapTextWithAnsi() so ANSI codes + long tokens are handled
 	 * consistently with the rest of the renderer.
 	 */
-	private wrapCellText(text: string, maxWidth: number, stylePrefix = ""): string[] {
-		const lines = wrapTextWithAnsi(text, Math.max(1, maxWidth));
-		return lines.map((line, index) => {
+	private wrapCellText(text: string, maxWidth: number, stylePrefix = "", selection?: MarkdownSelection): string[] {
+		const input = [text];
+		selection?.text(input, 0);
+		const width = Math.max(1, maxWidth);
+		const lines = selection?.wrap([input], width, { wrapImages: true }) ?? wrapTextWithAnsi(text, width);
+		const result = lines.map((line, index) => {
 			// Reset text styles after each non-final fragment, then restore the surrounding style before padding and borders.
 			const styleReset = index < lines.length - 1 ? "\x1b[22;23;24;25;27;28;29;39m" : "";
 			return `${line}${styleReset}${stylePrefix}`;
 		});
+		if (selection) composeVerticalSelection(result, [{ lines, row: 0, column: 0, width }]);
+		return result;
 	}
 
 	/**
@@ -844,6 +1367,7 @@ export class Markdown implements Component {
 		availableWidth: number,
 		nextTokenType?: string,
 		styleContext?: InlineStyleContext,
+		selection?: MarkdownSelection,
 	): string[] {
 		const lines: string[] = [];
 		const numCols = token.header.length;
@@ -858,6 +1382,16 @@ export class Markdown implements Component {
 		const availableForCells = availableWidth - borderOverhead;
 		if (availableForCells < numCols) {
 			// Too narrow to render a stable table. Fall back to raw markdown.
+			if (selection && token.raw) {
+				const raw = [token.raw];
+				selection.text(raw, 0);
+				const spacing: string[] = [];
+				if (nextTokenType && nextTokenType !== "space") {
+					spacing.push("");
+					selection.decoration(spacing, 0);
+				}
+				return selection.wrap([raw, spacing], availableWidth, { wrapImages: true });
+			}
 			const fallbackLines = token.raw ? wrapTextWithAnsi(token.raw, availableWidth) : [];
 			if (nextTokenType && nextTokenType !== "space") {
 				fallbackLines.push("");
@@ -956,6 +1490,22 @@ export class Markdown implements Component {
 			}
 		}
 
+		const parts: VerticalSelectionPart[] = [];
+		const groups: VerticalSelectionPart[][] = [];
+		const recordCells = (content: string[][], painted: string[][], row: number) => {
+			if (!selection) return;
+			let column = 2;
+			const cells: VerticalSelectionPart[] = [];
+			for (const [index, cell] of content.entries()) {
+				const width = columnWidths[index];
+				composeVerticalSelection(painted[index], [{ lines: cell, row: 0, column: 0, width }]);
+				cells.push({ lines: painted[index], row, column, width });
+				column += width + 3;
+			}
+			parts.push(...cells);
+			groups.push(cells);
+		};
+
 		// Render top border
 		const topBorderCells = columnWidths.map((w) => "─".repeat(w));
 		lines.push(`┌─${topBorderCells.join("─┬─")}─┐`);
@@ -963,18 +1513,23 @@ export class Markdown implements Component {
 		// Render header with wrapping
 		const headerCellLines: string[][] = token.header.map((cell, i) => {
 			const text = this.renderInlineTokens(cell.tokens || [], styleContext);
-			return this.wrapCellText(text, columnWidths[i], styleContext?.stylePrefix);
+			return this.wrapCellText(text, columnWidths[i], styleContext?.stylePrefix, selection);
 		});
 		const headerLineCount = Math.max(...headerCellLines.map((c) => c.length));
+		const headerPainted: string[][] = headerCellLines.map(() => []);
 
 		for (let lineIdx = 0; lineIdx < headerLineCount; lineIdx++) {
 			const rowParts = headerCellLines.map((cellLines, colIdx) => {
 				const text = cellLines[lineIdx] || "";
 				const padded = text + " ".repeat(Math.max(0, columnWidths[colIdx] - visibleWidth(text)));
-				return this.theme.bold(padded);
+				const styled = this.theme.bold(padded);
+				headerPainted[colIdx].push(styled);
+				return styled;
 			});
 			lines.push(`│ ${rowParts.join(" │ ")} │`);
 		}
+
+		recordCells(headerCellLines, headerPainted, 1);
 
 		// Render separator
 		const separatorCells = columnWidths.map((w) => "─".repeat(w));
@@ -986,18 +1541,23 @@ export class Markdown implements Component {
 			const row = token.rows[rowIndex];
 			const rowCellLines: string[][] = row.map((cell, i) => {
 				const text = this.renderInlineTokens(cell.tokens || [], styleContext);
-				return this.wrapCellText(text, columnWidths[i], styleContext?.stylePrefix);
+				return this.wrapCellText(text, columnWidths[i], styleContext?.stylePrefix, selection);
 			});
 			const rowLineCount = Math.max(...rowCellLines.map((c) => c.length));
+			const painted: string[][] = rowCellLines.map(() => []);
+			const rowStart = lines.length;
 
 			for (let lineIdx = 0; lineIdx < rowLineCount; lineIdx++) {
 				const rowParts = rowCellLines.map((cellLines, colIdx) => {
 					const text = cellLines[lineIdx] || "";
-					return text + " ".repeat(Math.max(0, columnWidths[colIdx] - visibleWidth(text)));
+					const padded = text + " ".repeat(Math.max(0, columnWidths[colIdx] - visibleWidth(text)));
+					painted[colIdx].push(padded);
+					return padded;
 				});
 				lines.push(`│ ${rowParts.join(" │ ")} │`);
 			}
 
+			recordCells(rowCellLines, painted, rowStart);
 			if (rowIndex < token.rows.length - 1) {
 				lines.push(separatorLine);
 			}
@@ -1009,6 +1569,22 @@ export class Markdown implements Component {
 
 		if (nextTokenType && nextTokenType !== "space") {
 			lines.push(""); // Add spacing after table
+		}
+		if (selection) {
+			setSelectionMap(lines, () => {
+				// Rewriting header styles may move later columns; never attach old geometry to them.
+				if (parts.some((part) => part.lines.some((line) => visibleWidth(line) !== part.width))) return undefined;
+				const ordered = groups.flatMap((cells) => {
+					const sources = cells.map(
+						(cell) => getSelectionMap(cell.lines)?.find((row) => row?.length)?.[0]?.source,
+					);
+					const group = sources.every((source) => source && !source.legacy) ? sources[0] : undefined;
+					return cells.map((cell, column) => ({ ...cell, readingOrder: group ? { group, column } : undefined }));
+				});
+				const mapped = [...lines];
+				composeHorizontalSelection(mapped, ordered, availableWidth);
+				return getSelectionMap(mapped);
+			});
 		}
 		return lines;
 	}

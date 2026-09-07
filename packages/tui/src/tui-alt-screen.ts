@@ -18,6 +18,8 @@ import {
 	type ScrollbarGeometry,
 } from "./layout.ts";
 import { getLayoutNode } from "./layout-node.ts";
+import { getClippedSelectionMap, getViewportSelectionMap } from "./selection-layout.ts";
+import { getSelectionMap, type SelectionMap, selectedCopySpans, selectionText } from "./selection-map.ts";
 import type { Terminal } from "./terminal.ts";
 import {
 	deleteAllKittyImages,
@@ -52,6 +54,7 @@ import {
 	getGraphemeCellRange,
 	getOsc8LinkAtColumn,
 	getWordSegmenter,
+	normalizeTerminalOutput,
 	sliceByColumn,
 	stripTerminalSequences,
 	truncateToWidth,
@@ -99,6 +102,14 @@ interface SelectionPoint {
 interface SelectionRange {
 	start: SelectionPoint;
 	end: SelectionPoint;
+}
+
+interface SelectionSource {
+	lines: readonly string[];
+	map: SelectionMap | undefined;
+	minColumn: number;
+	width: number;
+	overlay: boolean;
 }
 
 type SelectionGranularity = "character" | "word" | "line";
@@ -210,6 +221,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 	private readonly uploadedKittyImages = new Map<number, CachedKittyImage>();
 	private selectionAnchor?: SelectionPoint;
 	private selectionFocus?: SelectionPoint;
+	private selectionSnapshot?: SelectionSource;
 	private selectionGranularity: SelectionGranularity = "character";
 	private selectionInitialRange?: SelectionRange;
 	private lastClick?: ClickTarget;
@@ -863,6 +875,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 	}
 
 	private clearTextSelection(): void {
+		this.selectionSnapshot = undefined;
 		this.stopSelectionAutoScroll();
 		this.selectionPressActive = false;
 		this.selectionAnchor = undefined;
@@ -1368,6 +1381,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		this.selectionInitialRange = range;
 		this.selectionAnchor = range?.start ?? anchor;
 		this.selectionFocus = range?.end ?? anchor;
+		this.selectionSnapshot = this.getSelectionSource();
 		this.selectionDragged = false;
 		this.pressedUrl = range
 			? undefined
@@ -1416,28 +1430,121 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		return { start: Math.max(minColumn, start), end: Math.min(maxColumn, end) };
 	}
 
+	private getSelectionSource(
+		layout = this.currentLayout,
+		screen: readonly string[] = this.previousScreen,
+	): SelectionSource {
+		const scrollView = this.selectionAnchor?.scrollView;
+		const box = layout && scrollView ? getScrollViewBox(layout, scrollView) : undefined;
+		if (box?.scrollContentLines) {
+			const contentWidth = scrollView!.getContentWidth(box.rect.width);
+			const minColumn = Math.max(0, box.clip.x - box.rect.x);
+			const width = Math.max(0, Math.min(contentWidth, box.clip.x + box.clip.width - box.rect.x));
+			return {
+				lines: box.scrollContentLines,
+				map:
+					minColumn > 0 || width < contentWidth
+						? getClippedSelectionMap(box.scrollContentLines, minColumn, width)
+						: getSelectionMap(box.scrollContentLines),
+				minColumn,
+				width,
+				overlay: this.hasOverlay(),
+			};
+		}
+		if (scrollView) return { lines: [], map: undefined, minColumn: 0, width: 0, overlay: this.hasOverlay() };
+		const map = layout && !this.hasOverlay() ? getViewportSelectionMap(layout) : undefined;
+		const visible = (line: string) =>
+			stripTerminalSequences(
+				sliceByColumn(normalizeTerminalOutput(line), 0, layout?.width ?? this.terminal.columns, true),
+			);
+		const displayedMap = map?.map((spans, row) =>
+			visible(screen[row] ?? "") === visible(layout?.lines[row] ?? "") ? spans : undefined,
+		);
+		return {
+			lines: screen,
+			map: displayedMap,
+			minColumn: 0,
+			width: layout?.width ?? this.terminal.columns,
+			overlay: this.hasOverlay(),
+		};
+	}
+
+	private validateSelectionSnapshot(layout: LayoutFrame, screen: readonly string[]): void {
+		const previous = this.selectionSnapshot;
+		if (!previous || !this.selectionAnchor || !this.selectionFocus) return;
+		const next = this.getSelectionSource(layout, screen);
+		if (
+			layout.width !== this.terminal.columns ||
+			previous.width !== next.width ||
+			previous.minColumn !== next.minColumn ||
+			previous.overlay !== next.overlay
+		) {
+			this.clearTextSelection();
+			return;
+		}
+		const first = Math.min(this.selectionAnchor.row, this.selectionFocus.row);
+		const last = Math.max(this.selectionAnchor.row, this.selectionFocus.row);
+		const mapped =
+			previous.map?.slice(first, last + 1).some((row) => row !== undefined) ||
+			next.map?.slice(first, last + 1).some((row) => row !== undefined);
+		for (let row = first; row <= last; row++) {
+			const a = previous.map?.[row];
+			const b = next.map?.[row];
+			if (a === undefined && b === undefined) {
+				if (
+					(mapped || previous.overlay || next.overlay) &&
+					stripTerminalSequences(previous.lines[row] ?? "") !== stripTerminalSequences(next.lines[row] ?? "")
+				) {
+					this.clearTextSelection();
+					return;
+				}
+				continue;
+			}
+			if (
+				a?.length !== b?.length ||
+				a?.some((span, index) => {
+					const other = b?.[index];
+					return (
+						!other ||
+						(span.source !== other.source &&
+							!(span.source.legacy && other.source.legacy && span.source.text === other.source.text)) ||
+						span.breakBefore !== other.breakBefore ||
+						span.flow !== other.flow ||
+						span.readingOrder?.group !== other.readingOrder?.group ||
+						span.readingOrder?.column !== other.readingOrder?.column ||
+						span.readingOrder?.occurrence !== other.readingOrder?.occurrence ||
+						span.anchorBefore !== other.anchorBefore ||
+						span.splittable !== other.splittable ||
+						span.start !== other.start ||
+						span.end !== other.end ||
+						span.columnStart !== other.columnStart ||
+						span.columnEnd !== other.columnEnd
+					);
+				})
+			) {
+				this.clearTextSelection();
+				return;
+			}
+		}
+	}
+
 	private getActiveSelectionText(): string | undefined {
+		if (this.currentLayout) {
+			const hadSelection = this.selectionAnchor !== undefined;
+			this.validateSelectionSnapshot(this.currentLayout, this.previousScreen);
+			if (hadSelection && !this.selectionAnchor) this.requestRender();
+		}
 		const selection = this.getSelectionBounds();
 		if (!selection) return undefined;
-		let sourceLines: readonly string[] = this.previousScreen;
-		if (selection.start.scrollView) {
-			if (!this.currentLayout) return undefined;
-			const box = getScrollViewBox(this.currentLayout, selection.start.scrollView);
-			if (!box?.scrollContentLines) return undefined;
-			sourceLines = box.scrollContentLines;
-		}
-		const lines: string[] = [];
-		for (let row = selection.start.row; row <= selection.end.row; row++) {
-			const line = sourceLines[row] ?? "";
-			const columns = this.getSelectionColumns(line, row, selection);
-			lines.push(
-				stripTerminalSequences(
-					sliceByColumn(line, columns.start, Math.max(0, columns.end - columns.start), true),
-				).trimEnd(),
-			);
-		}
-		const text = lines.join("\n");
-		return text.length === 0 ? undefined : text;
+		const source = this.getSelectionSource();
+		return selectionText(
+			source.lines,
+			source.map,
+			selection.start.row,
+			selection.end.row,
+			(line, row) => this.getSelectionColumns(line, row, selection, source.minColumn, source.width),
+			source.width,
+		);
 	}
 
 	private async copySelectionToClipboard(): Promise<boolean> {
@@ -1569,6 +1676,9 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		let maxRow = screen.length - 1;
 		let minColumn = 0;
 		let maxColumn = this.terminal.columns;
+		let sourceRowOffset = 0;
+		let sourceColumnOffset = 0;
+		const source = this.getSelectionSource(layout, screen);
 		if (selection.start.scrollView) {
 			if (!layout) return screen;
 			const box = getScrollViewBox(layout, selection.start.scrollView);
@@ -1576,7 +1686,9 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 			minRow = Math.max(0, box.rect.y, box.clip.y);
 			maxRow = Math.min(screen.length - 1, box.rect.y + box.rect.height - 1, box.clip.y + box.clip.height - 1);
 			minColumn = Math.max(0, box.rect.x, box.clip.x);
-			maxColumn = Math.min(this.terminal.columns, box.rect.x + box.rect.width, box.clip.x + box.clip.width);
+			maxColumn = Math.min(this.terminal.columns, box.rect.x + source.width, box.clip.x + box.clip.width);
+			sourceRowOffset = selection.start.scrollView.scrollTop - box.rect.y;
+			sourceColumnOffset = box.rect.x;
 			screenSelection = {
 				start: {
 					...selection.start,
@@ -1603,10 +1715,36 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 			const lineWidth = visibleWidth(line);
 			const columns = this.getSelectionColumns(line, row, screenSelection, minColumn, maxColumn);
 			if (columns.end <= columns.start) return line;
-			const before = sliceByColumn(line, 0, columns.start, true);
-			const selected = sliceByColumn(line, columns.start, columns.end - columns.start, true);
-			const after = sliceByColumn(line, columns.end, Math.max(0, lineWidth - columns.end), true);
-			return `${before}${this.applySelectionHighlight(selected)}${after}`;
+			const spans = source.map?.[row + sourceRowOffset];
+			const ranges =
+				spans === undefined
+					? [columns]
+					: selectedCopySpans(
+							spans,
+							columns.start - sourceColumnOffset,
+							columns.end - sourceColumnOffset,
+							minColumn - sourceColumnOffset,
+							maxColumn - sourceColumnOffset,
+						)
+							.filter((span) => span.columnEnd > span.columnStart)
+							.map((span) => ({
+								start: span.columnStart + sourceColumnOffset,
+								end: span.columnEnd + sourceColumnOffset,
+							}));
+			const merged: Array<{ start: number; end: number }> = [];
+			for (const range of ranges) {
+				const previous = merged[merged.length - 1];
+				if (previous && previous.end >= range.start) previous.end = Math.max(previous.end, range.end);
+				else merged.push({ ...range });
+			}
+			let result = line;
+			for (const range of merged.reverse()) {
+				const before = sliceByColumn(result, 0, range.start, true);
+				const selected = sliceByColumn(result, range.start, range.end - range.start, true);
+				const after = sliceByColumn(result, range.end, Math.max(0, lineWidth - range.end), true);
+				result = `${before}${this.applySelectionHighlight(selected)}${after}`;
+			}
+			return result;
 		});
 	}
 
@@ -1663,6 +1801,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		screen = this.compositeScrollToEndIndicator(screen, nextLayout, width);
 		screen = this.compositeOverlays(screen, width, height);
 		if (screen.length > height) screen = screen.slice(screen.length - height);
+		this.validateSelectionSnapshot(nextLayout, screen);
 		screen = this.applySelection(screen, nextLayout);
 		screen = this.compositeFlashes(screen, width, height);
 
