@@ -172,6 +172,7 @@ import {
 } from "./theme/theme.ts";
 import { InteractiveThemeController } from "./theme/theme-controller.ts";
 import { createInteractiveTui, createInteractiveTuiReference } from "./tui-renderer.ts";
+import { WorkingActivity } from "./working-activity.ts";
 
 export { createInteractiveTui, createInteractiveTuiReference } from "./tui-renderer.ts";
 
@@ -406,6 +407,7 @@ export class InteractiveMode {
 	private activeWorkingIndicatorEmbedded = false;
 	private readonly idleStatus = new IdleStatus();
 	private workingMessage: string | undefined = undefined;
+	private workingActivity = new WorkingActivity();
 	private workingVisible = true;
 	private workingIndicatorOptions: WorkingIndicatorOptions | undefined = undefined;
 	private readonly defaultWorkingMessage = "Working";
@@ -2138,14 +2140,14 @@ export class InteractiveMode {
 			? (text: string) =>
 					(this.editor.borderColor ?? theme.getThinkingBorderColor(this.session.thinkingLevel || "off"))(text)
 			: undefined;
-		this.showStatusIndicator(
-			new WorkingStatusIndicator(
-				this.ui,
-				this.workingMessage ?? this.defaultWorkingMessage,
-				this.workingIndicatorOptions,
-				colorFn,
-			),
+		const indicator = new WorkingStatusIndicator(
+			this.ui,
+			this.workingMessage ?? this.defaultWorkingMessage,
+			this.workingIndicatorOptions,
+			colorFn,
 		);
+		if (this.workingMessage === undefined) indicator.setActivity(this.workingActivity);
+		this.showStatusIndicator(indicator);
 	}
 
 	private setWorkingVisible(visible: boolean): void {
@@ -2264,10 +2266,8 @@ export class InteractiveMode {
 		this.workingMessage = undefined;
 		this.workingVisible = true;
 		this.setWorkingIndicator();
-		if (this.activeStatusIndicator?.kind === "working") {
-			this.activeStatusIndicator.setMessage(
-				`${this.defaultWorkingMessage} (${keyText("app.interrupt")} to interrupt)`,
-			);
+		if (this.activeStatusIndicator instanceof WorkingStatusIndicator) {
+			this.activeStatusIndicator.setActivity(this.workingActivity, ` (${keyText("app.interrupt")} to interrupt)`);
 		}
 		this.setHiddenThinkingLabel();
 	}
@@ -2430,8 +2430,9 @@ export class InteractiveMode {
 			setStatus: (key, text) => this.setExtensionStatus(key, text),
 			setWorkingMessage: (message) => {
 				this.workingMessage = message;
-				if (this.activeStatusIndicator?.kind === "working") {
-					this.activeStatusIndicator.setMessage(message ?? this.defaultWorkingMessage);
+				if (this.activeStatusIndicator instanceof WorkingStatusIndicator) {
+					this.activeStatusIndicator.setActivity(message === undefined ? this.workingActivity : undefined);
+					if (message !== undefined) this.activeStatusIndicator.setMessage(message);
 				}
 			},
 			setWorkingVisible: (visible) => this.setWorkingVisible(visible),
@@ -3168,6 +3169,8 @@ export class InteractiveMode {
 		}
 
 		this.footer.invalidate();
+		this.workingActivity.update(event);
+		if (this.activeStatusIndicator instanceof WorkingStatusIndicator) this.activeStatusIndicator.refreshActivity();
 
 		switch (event.type) {
 			case "agent_start":

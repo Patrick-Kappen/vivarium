@@ -127,7 +127,9 @@ for (const useFrame of [false, true])
 			expect(await tui.copyActiveSelectionToClipboard()).toBe(true);
 			expect(copied[0]).toContain("visible answer");
 			expect(copied[0]).not.toContain("PRIVATE THINKING");
-			const row = component.render(24).findIndex((line) => stripTerminalSequences(line).includes("Thinking..."));
+			const row = component
+				.render(24)
+				.findIndex((line) => stripTerminalSequences(line).includes("Thinking (hidden)"));
 			const x = useFrame ? 3 : 2;
 			terminal.sendInput(`\x1b[<0;${x};${row + 1}M`);
 			terminal.sendInput(`\x1b[<0;${x};${row + 1}m`);
@@ -227,7 +229,7 @@ test("missing timestamps do not invent a time and hidden thinking is never resto
 	await chat(root, async (tui, terminal, copied) => {
 		selectAll(root, tui, terminal);
 		expect(await tui.copyActiveSelectionToClipboard()).toBe(true);
-		expect(copied).toEqual(["USER\n\nquestion\n\nAGENT\n\nThinking...\nanswer"]);
+		expect(copied).toEqual(["USER\n\nquestion\n\nAGENT\n\nThinking (hidden)\nanswer"]);
 	});
 });
 

@@ -4,6 +4,7 @@ import { describe, expect, test, vi } from "vitest";
 import type { SessionEntry } from "../src/core/session-manager.ts";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
 import { initTheme } from "../src/modes/interactive/theme/theme.ts";
+import { WorkingActivity } from "../src/modes/interactive/working-activity.ts";
 import { stripAnsi } from "../src/utils/ansi.ts";
 
 describe("InteractiveMode compaction events", () => {
@@ -140,6 +141,7 @@ describe("InteractiveMode compaction events", () => {
 			footer: { invalidate: vi.fn() },
 			autoCompactionEscapeHandler: undefined as (() => void) | undefined,
 			autoCompactionLoader: undefined,
+			workingActivity: new WorkingActivity(),
 			defaultEditor: {},
 			statusContainer: { clear: vi.fn() },
 			chatContainer: { clear: vi.fn() },
@@ -203,6 +205,7 @@ describe("InteractiveMode compaction events", () => {
 			footer: { invalidate: vi.fn() },
 			activeStatusIndicator: undefined,
 			workingVisible: true,
+			workingActivity: new WorkingActivity(),
 			showWorkingStatusIndicator: vi.fn(),
 			clearStatusIndicator: vi.fn(),
 			settingsManager: { getShowTerminalProgress: () => true },
