@@ -50,3 +50,48 @@ At 150 selected messages, timer-callback p95 fell from 118.4 to 5.3 ms and peak
 RSS from 203.4 to 119.8 MiB. The no-selection case has modest additional overhead.
 These are controlled renderer measurements, not physical-terminal latency or a
 claim that every user stall, or selection interruption during tools, is fixed.
+
+## On-demand source preparation
+
+Text no longer strips terminal sequences or allocates a copy source in its
+constructor or setText. Its exact rendered snapshot resolves the source on the
+first metadata request. Markdown similarly defers its emitted text sources,
+normalization checks, code highlighter validation and code-line descriptors.
+Visible rendering is unchanged; selection never replays a renderer, highlighter,
+transformer or theme callback. There is no automatic end-of-round calculation.
+
+A bounded cache cell per emission slot reuses equal logical sources even when
+snapshots resolve out of order. Each render memoizes its own result, so a later
+update cannot replace an old snapshot's source. Cache cells do not retain old
+render recipes: thousands of unselected updates cannot form a recursive chain.
+Rewriting highlighters and backgrounds retain their conservative fallback.
+
+Wrapping ranges, token provenance and rendered strings still must be recorded
+while painting. In particular, original tab/newline lexer tracing remains in
+the render path. This is not a claim of zero selection bookkeeping, nor does it
+change the existing granularity inside one large component. Selection may need
+to validate a whole code block before trusting its source.
+
+Eleven additional demand regressions verify unresolved source caches, both
+resolution orders, old-source ownership, 10,000 unselected updates, normalization
+and fail-closed rewriting. The full TUI suite (1,330 passes, two skips, six TODOs),
+45 focused coding-agent tests, root check, offline build and isolated repository
+test runner pass.
+
+A separate sequential Node 22 probe compares the already-fixed installed engine
+with this follow-up: 100-column Text/Markdown components, synthetic growing
+content, three warmups and 24 updates, with no selection during streaming. Mean
+setText-plus-render times were:
+
+| Fixture | Installed | On-demand preparation |
+| --- | ---: | ---: |
+| 800 code lines | 1.79 ms | 1.38 ms |
+| 600 prose paragraphs | 5.61 ms | 5.46 ms |
+| 600 code lines with tabs/CRLF | 1.83 ms | 1.37 ms |
+| 800 ANSI-styled Text lines | 2.39 ms | 1.25 ms |
+
+All frame and final full-copy hashes match. This shifts work rather than deleting
+it: final full-code-copy time was 55.54 -> 60.33 ms and full Text copy was
+38.82 -> 44.25 ms. These deliberately large full-copy operations are not a
+mouse-to-highlight benchmark. Prose timer p95/RSS did not improve in this run;
+no universal latency or memory improvement is claimed.

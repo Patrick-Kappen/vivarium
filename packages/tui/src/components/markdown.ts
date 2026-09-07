@@ -8,13 +8,8 @@ import {
 	composeVerticalSelection,
 	type VerticalSelectionPart,
 } from "../selection-compose.ts";
-import {
-	type CopySource,
-	getSelectionMap,
-	joinSelectionMaps,
-	setSelectionMap,
-	trackSelectionLines,
-} from "../selection-map.ts";
+import { getSelectionMap, joinSelectionMaps, setSelectionMap, trackSelectionLines } from "../selection-map.ts";
+import type { CopySourceCache } from "../selection-source.ts";
 import { getCapabilities, hyperlink, isImageLine } from "../terminal-image.ts";
 import type { Component } from "../tui.ts";
 import { applyBackgroundToLine, visibleWidth, wrapTextWithAnsi } from "../utils.ts";
@@ -664,7 +659,7 @@ export class Markdown implements Component {
 	private cachedText?: string;
 	private cachedWidth?: number;
 	private cachedLines?: string[];
-	private copySources: readonly CopySource[] = [];
+	private copySources: readonly CopySourceCache[] = [];
 
 	constructor(
 		text: string,
