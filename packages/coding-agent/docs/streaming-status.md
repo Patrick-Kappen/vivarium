@@ -31,6 +31,15 @@ rather than the live `Thinking...`. Custom labels and click-to-expand behavior
 remain available. This is presentation only: hidden reasoning is not added to
 copied text, model context or session data.
 
+With thinking hidden in the client, an explicit `thinking_start` event now shows
+that collapsed label even before the first reasoning text arrives, including
+in a new response after a tool call. The renderer previously discarded empty
+thinking blocks, so the label waited for non-empty text. Invalidation and
+visibility toggles preserve the active-block state; empty blocks disappear when
+they end and are not retained in history. This does not change model reasoning
+settings or invent reasoning before a stream event. Providers that deliver the
+start event late still cannot produce an earlier client label.
+
 ## Evidence and limits
 
 A separate managed diagnostic session on 2026-09-07 used one harmless
@@ -54,3 +63,9 @@ completion, parallel tools, stream boundaries, extension overrides, visibility,
 compaction precedence and timer cleanup. Existing thinking-click and message-copy
 regressions retain their assertions with the intentionally changed completed
 label.
+
+`hidden-thinking-stream.test.ts` covers empty thinking starts through the real
+interactive handler before and after a tool call, visibility toggles, independent
+block completion, stable click overrides and empty-block cleanup. Three handler
+regressions fail before the fix and pass after it; these are controlled event
+reproductions, not fresh live provider timing measurements.
