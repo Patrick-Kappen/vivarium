@@ -8,6 +8,7 @@ import {
 	setSelectionMap,
 	textSelectionMap,
 } from "./selection-map.ts";
+import { type CopySourceCache, deferCopySource } from "./selection-source.ts";
 import { reflowSelectionSpans } from "./selection-wrap.ts";
 import { isImageLine } from "./terminal-image.ts";
 import { stripTerminalSequences, visibleWidth, wrapTextWithAnsiRanges } from "./utils.ts";
@@ -24,22 +25,22 @@ const prefixedSources = new WeakMap<CopySource, { prefix: string; start: number;
 
 /** Metadata recorded at Markdown emission sites, before visual wrapping or margins. */
 export class MarkdownSelection {
-	readonly sources: CopySource[] = [];
-	private readonly previous: readonly CopySource[];
-	private readonly rows = new WeakMap<string[], Map<number, MarkdownLineSource | null>>();
+	readonly sources: CopySourceCache[] = [];
+	private readonly previous: readonly CopySourceCache[];
+	private readonly rows = new WeakMap<string[], Map<number, (() => MarkdownLineSource | undefined) | null>>();
+	private readonly codeRows = new WeakMap<string[], () => ReadonlyMap<number, MarkdownLineSource>>();
 
-	constructor(previous: readonly CopySource[]) {
+	constructor(previous: readonly CopySourceCache[]) {
 		this.previous = previous;
 	}
 
-	private source(text: string): CopySource {
-		const old = this.previous[this.sources.length];
-		const source = old?.text === text ? old : { text };
-		this.sources.push(source);
-		return source;
+	private source(text: () => string): () => CopySource {
+		const cache = this.previous[this.sources.length] ?? {};
+		this.sources.push(cache);
+		return deferCopySource(cache, text);
 	}
 
-	private set(lines: string[], row: number, source: MarkdownLineSource | null): void {
+	private set(lines: string[], row: number, source: (() => MarkdownLineSource | undefined) | null): void {
 		let rows = this.rows.get(lines);
 		if (!rows) {
 			rows = new Map();
@@ -53,43 +54,60 @@ export class MarkdownSelection {
 	}
 
 	text(lines: string[], row: number, prefix = "", original?: string): void {
-		const plain = stripTerminalSequences(lines[row]!);
-		if (!plain.startsWith(prefix)) return;
-		const content = plain.slice(prefix.length);
-		const originalPlain = original === undefined ? content : stripTerminalSequences(original);
-		const normalization = originalPlain !== content ? new MarkdownSource(originalPlain) : undefined;
-		if (normalization && normalization.text !== content) return;
-		this.set(lines, row, { source: this.source(originalPlain), prefix, offset: 0, normalization });
+		const painted = lines[row]!;
+		const source = this.source(() =>
+			original === undefined
+				? stripTerminalSequences(painted).slice(prefix.length)
+				: stripTerminalSequences(original),
+		);
+		this.set(lines, row, () => {
+			const plain = stripTerminalSequences(painted);
+			if (!plain.startsWith(prefix)) return undefined;
+			const content = plain.slice(prefix.length);
+			const copySource = source();
+			const normalization = copySource.text !== content ? new MarkdownSource(copySource.text) : undefined;
+			if (normalization && normalization.text !== content) return undefined;
+			return { source: copySource, prefix, offset: 0, normalization };
+		});
 	}
 
 	code(lines: string[], code: string, prefix: string, original: string | null = code): void {
 		this.decoration(lines, 0);
 		this.decoration(lines, lines.length - 1);
 		if (original === null) return;
-		const plain = stripTerminalSequences(code);
-		const originalPlain = stripTerminalSequences(original);
-		const normalization = originalPlain !== plain ? new MarkdownSource(originalPlain) : undefined;
-		if (normalization && normalization.text !== plain) return;
-		const source = this.source(originalPlain);
-		const plainPrefix = stripTerminalSequences(prefix);
-		const codeLines = plain.split("\n");
-		if (lines.length !== codeLines.length + 2 || prefix.includes("\t")) return;
-		for (const [index, line] of codeLines.entries()) {
-			// Highlighters may rewrite or reorder text. Only styling-only output can
-			// inherit the code source; unknown rows retain their rendered fallback.
-			if (stripTerminalSequences(lines[index + 1]!) !== plainPrefix + line) return;
-		}
-		let offset = 0;
-		for (const [index, line] of codeLines.entries()) {
-			this.set(lines, index + 1, { source, prefix: plainPrefix, offset, normalization });
-			offset += line.length + 1;
-		}
+		const painted = [...lines];
+		const source = this.source(() => stripTerminalSequences(original));
+		let resolved: Map<number, MarkdownLineSource> | undefined;
+		this.codeRows.set(lines, () => {
+			if (resolved) return resolved;
+			resolved = new Map();
+			const plain = stripTerminalSequences(code);
+			const copySource = source();
+			const normalization = copySource.text !== plain ? new MarkdownSource(copySource.text) : undefined;
+			if (normalization && normalization.text !== plain) return resolved;
+			const plainPrefix = stripTerminalSequences(prefix);
+			const codeLines = plain.split("\n");
+			if (painted.length !== codeLines.length + 2 || prefix.includes("\t")) return resolved;
+			for (const [index, line] of codeLines.entries()) {
+				// Validate the original highlighter output only on selection. Do not
+				// rerun callbacks or inherit hidden text from a rewriting highlighter.
+				if (stripTerminalSequences(painted[index + 1]!) !== plainPrefix + line) return resolved;
+			}
+			let offset = 0;
+			for (const [index, line] of codeLines.entries()) {
+				resolved.set(index + 1, { source: copySource, prefix: plainPrefix, offset, normalization });
+				offset += line.length + 1;
+			}
+			return resolved;
+		});
 	}
 
 	decoratePrefix(result: string[], content: string[], prefixes: readonly string[], semanticFirstPrefix = false): void {
 		const height = result.length;
-		const marker = semanticFirstPrefix ? this.source(stripTerminalSequences(prefixes[0] ?? "")) : undefined;
+		const markerText = prefixes[0] ?? "";
+		const markerSource = semanticFirstPrefix ? this.source(() => stripTerminalSequences(markerText)) : undefined;
 		setSelectionMap(result, () => {
+			const marker = markerSource?.();
 			const map = getSelectionMap(content);
 			const rows = content.map((line, row) => map?.[row] ?? legacySelectionRow(line));
 			const first = marker ? rows.find((row) => row.length > 0)?.[0] : undefined;
@@ -166,8 +184,10 @@ export class MarkdownSelection {
 				options.onWrappedLine?.();
 				result.push(wrappedLine);
 			}
-			const descriptor = this.rows.get(block)?.get(index);
+			const descriptorSource = this.rows.get(block)?.get(index);
+			const codeSource = this.codeRows.get(block);
 			builders.push(() => {
+				const descriptor = descriptorSource === null ? null : (descriptorSource?.() ?? codeSource?.().get(index));
 				if (descriptor === null) return wrapped.lines.map(() => []);
 				if (line.includes("\t") || stripTerminalSequences(line) !== stripTerminalSequences(original))
 					return wrapped.lines.map(() => undefined);
