@@ -3248,7 +3248,14 @@ export class InteractiveMode {
 			case "message_update":
 				if (this.streamingComponent && event.message.role === "assistant") {
 					this.streamingMessage = event.message;
-					this.streamingComponent.updateContent(this.streamingMessage, true);
+					const streamEvent = event.assistantMessageEvent;
+					const thinkingUpdate =
+						streamEvent.type === "thinking_start" ||
+						streamEvent.type === "thinking_delta" ||
+						streamEvent.type === "thinking_end"
+							? { contentIndex: streamEvent.contentIndex, finished: streamEvent.type === "thinking_end" }
+							: undefined;
+					this.streamingComponent.updateContent(this.streamingMessage, true, thinkingUpdate);
 
 					for (const content of this.streamingMessage.content) {
 						if (content.type === "toolCall") {

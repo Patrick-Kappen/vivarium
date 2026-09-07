@@ -34,6 +34,7 @@ export class AssistantMessageComponent extends Container {
 	private selectionMessage: SelectionMessage = { label: "AGENT" };
 	private hasToolCalls = false;
 	private isStreaming = false;
+	private activeThinkingIndices = new Set<number>();
 	private thinkingVisibilityOverrides = new Map<number, boolean>();
 
 	constructor(
@@ -125,22 +126,28 @@ export class AssistantMessageComponent extends Container {
 		return lines;
 	}
 
-	updateContent(message: AssistantMessage, isStreaming = this.isStreaming): void {
+	updateContent(
+		message: AssistantMessage,
+		isStreaming = this.isStreaming,
+		thinkingUpdate?: { contentIndex: number; finished: boolean },
+	): void {
 		this.lastMessage = message;
 		this.isStreaming = isStreaming;
+		if (!isStreaming) this.activeThinkingIndices.clear();
+		else if (thinkingUpdate) {
+			if (thinkingUpdate.finished) this.activeThinkingIndices.delete(thinkingUpdate.contentIndex);
+			else this.activeThinkingIndices.add(thinkingUpdate.contentIndex);
+		}
 		const label = messageSelectionLabel("assistant", message.timestamp);
 		if (label !== this.selectionMessage.label) this.selectionMessage = { label };
 
 		// Clear content container
 		this.contentContainer.clear();
 
-		const hasVisibleContent = message.content.some(
-			(c) => (c.type === "text" && c.text.trim()) || (c.type === "thinking" && c.thinking.trim()),
-		);
-
-		if (hasVisibleContent) {
-			this.contentContainer.addChild(new Spacer(1));
-		}
+		const addContent = (component: Component) => {
+			if (this.contentContainer.children.length === 0) this.contentContainer.addChild(new Spacer(1));
+			this.contentContainer.addChild(component);
+		};
 
 		// Render content in order
 		let thinkingRunIndex = 0;
@@ -149,18 +156,20 @@ export class AssistantMessageComponent extends Container {
 			if (content.type === "text" && content.text.trim()) {
 				// Assistant text messages with no background - trim the text
 				// Set paddingY=0 to avoid extra spacing before tool executions
-				this.contentContainer.addChild(
+				addContent(
 					new Markdown(content.text.trim(), this.outputPad, 0, this.markdownTheme, undefined, {
 						transform: createMarkdownTransform("assistant", this.isStreaming, this.markdownTransformers),
 					}),
 				);
 			} else if (content.type === "thinking") {
+				let thinkingInProgress = false;
 				const thinkingBlocks: string[] = [];
 				for (; i < message.content.length; i++) {
 					const thinkingContent = message.content[i];
 					if (thinkingContent.type !== "thinking") {
 						break;
 					}
+					thinkingInProgress ||= this.activeThinkingIndices.has(i);
 					const thinking = thinkingContent.thinking.trim();
 					if (thinking) {
 						thinkingBlocks.push(thinking);
@@ -168,9 +177,11 @@ export class AssistantMessageComponent extends Container {
 				}
 				i--;
 
-				if (thinkingBlocks.length === 0) {
-					continue;
-				}
+				// Count source runs even when empty, so toggles do not move to another run.
+				const runIndex = thinkingRunIndex++;
+				const hidden = this.thinkingVisibilityOverrides.get(runIndex) ?? this.hideThinkingBlock;
+				const pendingHiddenThinking = hidden && thinkingInProgress;
+				if (thinkingBlocks.length === 0 && !pendingHiddenThinking) continue;
 
 				// Add spacing only when another visible assistant content block follows.
 				// This avoids a superfluous blank line before separately-rendered tool execution blocks.
@@ -178,8 +189,6 @@ export class AssistantMessageComponent extends Container {
 					.slice(i + 1)
 					.some((c) => (c.type === "text" && c.text.trim()) || (c.type === "thinking" && c.thinking.trim()));
 
-				const runIndex = thinkingRunIndex++;
-				const hidden = this.thinkingVisibilityOverrides.get(runIndex) ?? this.hideThinkingBlock;
 				const thinkingLabel =
 					!this.isStreaming && this.hiddenThinkingLabel === "Thinking..."
 						? "Thinking (hidden)"
@@ -203,7 +212,7 @@ export class AssistantMessageComponent extends Container {
 								),
 							},
 						);
-				this.contentContainer.addChild(
+				addContent(
 					new MouseRegion(thinkingComponent, (event) => {
 						if (event.type !== "click" || event.button !== "left") return undefined;
 						this.thinkingVisibilityOverrides.set(runIndex, !hidden);
