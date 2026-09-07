@@ -152,17 +152,79 @@ paragraph or list-item appends. A streamed partial closing fence remains exclude
 closing fence completes. Old rendered snapshots do not read later Markdown state.
 Zero-cell blank anchors outside a clipped pane cannot select the neighbouring pane.
 
-This is deliberately incomplete: unknown token output retains legacy content rows. Enclosing mapped lists and
-quotes exclude their own presentation without claiming unknown bodies are source-aware. Inputs containing tabs or CR
-currently keep the whole Markdown component unmapped because preprocessing and
-lexer normalization do not yet carry their original offsets. LF code token text
-is supported; this is not an original-Markdown-byte preservation guarantee.
+Top-level fenced code now preserves original tabs, CRLF and bare CR through the
+existing normalization. `MarkdownSource` records only normalization edits and maps
+normalized UTF-16 boundaries back to the transformed input. The tokenizer records
+body captures using the installed lexer's own fence expression. Only contiguous,
+exact top-level token coverage and validated body ranges can inherit that source;
+there is no search for matching text after skipped lexer regions. Fenced-code
+indentation compensation records each line's retained range using the installed
+lexer's indentation rules. Indented code records the ranges left by its prefix
+removal expression. Their concatenation must equal the actual token text before
+any original bytes are inherited. Original newline sequences remain in the ranges,
+while syntactic indentation does not enter the logical copy document. Partial streamed
+fence removal updates the capture boundary explicitly. Highlighting still receives
+the same normalized text and must remain styling-only before inheriting metadata.
+Expanded tab cells refer to the original tab, while internal source newlines keep
+their original sequence. Neither fence syntax nor renderer indentation is restored.
+
+Top-level paragraphs also retain original tabs and internal newline sequences.
+Their ranges come from the installed paragraph expression, including its explicit
+terminal-newline removal. Inline tokens must cover the entire captured body.
+Unchanged text uses its complete interval; escapes use the lexer's captured character
+unless preserving backslashes is explicitly requested. Inline-code captures record
+newline-to-space conversion and the lexer's optional one-space edge trimming.
+Internal code newlines therefore copy as visible spaces, not hidden source CRLF.
+A trim cutting through an expanded tab retains fallback rather than restoring it whole.
+
+Emphasis, strong emphasis and strict strikethrough follow their declared delimiter
+removal into recursively traced child tokens. Unmatched delimiters remain literal
+text. Hard breaks retain their original newline interval, excluding the spaces or
+backslash consumed as break syntax. Link labels use exact captures for explicit
+and reference links, or the lexer's retained text for automatic links. Labels are
+traced recursively; URL suffixes follow the same visibility policy as rendering.
+OSC 8 destinations and link titles are never added to the logical copy text.
+Escaped-bracket label normalization, HTML, math and lexer-merged bodies without
+exact captures remain explicit provenance limitations. Styling callbacks are validated before inheriting the composed
+logical paragraph, and transformed input remains the only source. Collapsed source blank lines between paragraphs are not restored;
+these use the existing visible block-separator policy rather than original bytes.
+
+Nested quotes and lists now pass lexer-declared removal views to their children.
+Quote-prefix removal, list-marker removal, continuation indentation, task-prefix
+removal and final-item trimming must reproduce the actual token body exactly.
+The views compose retained normalized intervals back to the original input; they
+do not search for matching child text or infer provenance from painted rows.
+Code, paragraph and inline tracing then uses those child coordinates. Visible
+canonical list markers remain content, while quote borders and continuation padding
+remain decoration. Missing coverage stops inheritance locally. In particular,
+setext-protection insertions and synthetic loose-task token rewrites that fail
+validation retain fallback rather than claiming original-byte preservation.
+
+A prefix-only empty wrap can precede real content whitespace. Its declared wrap
+gap is retained before decorative-prefix filtering, so a narrow first code line
+cannot silently lose its initial tab. Selecting only the later text still excludes
+that earlier whitespace anchor.
+
+This is deliberately incomplete: unknown token output retains legacy content rows.
+Unsupported inline transformations and lexer rewrites without validated source ranges retain fallback. Indentation removal that cuts through an
+expanded tab and lost token coverage retain local legacy bodies with known
+fences excluded. A partially consumed tab cannot simply be restored whole; a tab
+consumed entirely as Markdown indentation is excluded, not copied as code. Joined
+ranges must still normalize to the rendered token text: removing indentation
+between a bare CR and LF must not silently collapse a visible blank line. Unaffected, exactly covered tokens can stay mapped alongside
+unsupported regions. Enclosing mapped lists and quotes exclude their own
+presentation without claiming unknown bodies are source-aware. This is not a
+whole-Markdown-byte preservation guarantee.
 Multiple source blank lines collapsed by the renderer are not reconstructed.
 The existing general separator/occlusion and public API limitations still apply.
 
 `../test/markdown-selection.test.ts` contains 62 focused regressions;
 `../test/markdown-table-selection.test.ts` contains 34 table regressions, and
-`../test/selection-reading-order.test.ts` adds four generic ordering regressions. Existing Markdown
+`../test/selection-reading-order.test.ts` adds four generic ordering regressions.
+`../test/markdown-code-provenance.test.ts` adds 33 code-source regressions and
+`../test/markdown-source.test.ts` checks normalization boundaries in four tests.
+`../test/markdown-prose-provenance.test.ts` adds 55 paragraph/inline-source regressions.
+`../test/markdown-nested-provenance.test.ts` adds 23 nested-source/view regressions. Existing Markdown
 render tests remain the independent check that presentation is unchanged. All of
 the remaining cases must be addressed before claiming complete message copying.
 

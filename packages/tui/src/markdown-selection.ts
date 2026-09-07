@@ -1,3 +1,4 @@
+import { MarkdownSource } from "./markdown-source.ts";
 import {
 	type CopySource,
 	type CopySpan,
@@ -14,6 +15,7 @@ interface MarkdownLineSource {
 	source: CopySource;
 	prefix: string;
 	offset: number;
+	normalization?: MarkdownSource;
 }
 
 // One live composition per source bounds cache growth while retaining identity on ordinary rerenders.
@@ -49,17 +51,25 @@ export class MarkdownSelection {
 		this.set(lines, row, null);
 	}
 
-	text(lines: string[], row: number, prefix = ""): void {
+	text(lines: string[], row: number, prefix = "", original?: string): void {
 		const plain = stripTerminalSequences(lines[row]!);
 		if (!plain.startsWith(prefix)) return;
-		this.set(lines, row, { source: this.source(plain.slice(prefix.length)), prefix, offset: 0 });
+		const content = plain.slice(prefix.length);
+		const originalPlain = original === undefined ? content : stripTerminalSequences(original);
+		const normalization = originalPlain !== content ? new MarkdownSource(originalPlain) : undefined;
+		if (normalization && normalization.text !== content) return;
+		this.set(lines, row, { source: this.source(originalPlain), prefix, offset: 0, normalization });
 	}
 
-	code(lines: string[], code: string, prefix: string): void {
+	code(lines: string[], code: string, prefix: string, original: string | null = code): void {
 		this.decoration(lines, 0);
 		this.decoration(lines, lines.length - 1);
+		if (original === null) return;
 		const plain = stripTerminalSequences(code);
-		const source = this.source(plain);
+		const originalPlain = stripTerminalSequences(original);
+		const normalization = originalPlain !== plain ? new MarkdownSource(originalPlain) : undefined;
+		if (normalization && normalization.text !== plain) return;
+		const source = this.source(originalPlain);
 		const plainPrefix = stripTerminalSequences(prefix);
 		const codeLines = plain.split("\n");
 		if (lines.length !== codeLines.length + 2 || prefix.includes("\t")) return;
@@ -70,7 +80,7 @@ export class MarkdownSelection {
 		}
 		let offset = 0;
 		for (const [index, line] of codeLines.entries()) {
-			this.set(lines, index + 1, { source, prefix: plainPrefix, offset });
+			this.set(lines, index + 1, { source, prefix: plainPrefix, offset, normalization });
 			offset += line.length + 1;
 		}
 	}
@@ -198,14 +208,33 @@ export class MarkdownSelection {
 						spans?.some((span) => span.start < prefix && span.end > prefix && span.columnStart !== span.columnEnd)
 					)
 						return undefined;
-					return spans?.flatMap((span) => {
+					return spans?.flatMap((originalSpan) => {
+						let span = originalSpan;
+						const next = wrapped.ranges[row + 1];
+						const range = wrapped.ranges[row]!;
+						// A prefix-only empty wrap can precede omitted content whitespace.
+						// Keep that declared gap before filtering the decorative prefix.
+						if (
+							next &&
+							span.columnStart === span.columnEnd &&
+							span.start === span.end &&
+							!/[\r\n]/.test(line.slice(range.end, next.start))
+						) {
+							span = {
+								...span,
+								end: Math.max(span.end, stripTerminalSequences(line.slice(0, next.start)).length),
+							};
+						}
 						if (span.start < prefix && (span.columnStart !== span.columnEnd || span.end < prefix)) return [];
+						const start = Math.max(prefix, span.start) - prefix + descriptor.offset;
+						const end = span.end - prefix + descriptor.offset;
+						const sourceRange = descriptor.normalization?.range(start, end) ?? { start, end };
 						return [
 							{
 								...span,
 								source: descriptor.source,
-								start: Math.max(prefix, span.start) - prefix + descriptor.offset,
-								end: span.end - prefix + descriptor.offset,
+								...sourceRange,
+								splittable: descriptor.source.text[sourceRange.start] === "\t",
 							},
 						];
 					});

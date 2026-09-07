@@ -455,8 +455,8 @@ describe("Markdown emission selection metadata", () => {
 		assert.equal(reads, 2, "one snapshot validation and one factory evaluation, not a scan per row");
 	});
 
-	it("retains explicit legacy fallback for missing tab and CR lexer provenance", () => {
-		for (const input of ["a\tb", "```\n\tx\n```", "a\r\nb"]) {
+	it("retains explicit legacy fallback for untraced rich prose", () => {
+		for (const input of ["![a](https://example.test/image)\tb", "<b>a</b>\r\nb"]) {
 			assert.equal(getSelectionMap(new Markdown(input, 0, 0, theme).render(20)), undefined);
 		}
 	});
