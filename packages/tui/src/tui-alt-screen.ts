@@ -15,6 +15,7 @@ import {
 	getScrollViewsAt,
 	type LayoutFrame,
 	renderLayoutFrame,
+	repaintLayoutFrame,
 	type ScrollbarGeometry,
 } from "./layout.ts";
 import { getLayoutNode } from "./layout-node.ts";
@@ -212,6 +213,8 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 	private previousScreenHeight = 0;
 	private layoutRoot: Component | undefined;
 	private currentLayout: LayoutFrame | undefined;
+	private contentRenderPending = true;
+	private viewportRenderPending = false;
 	private readonly implicitDocument: Component;
 	private readonly implicitScrollView: ScrollView;
 	private readonly flashes: AltScreenFlashContainer;
@@ -272,7 +275,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 			},
 		};
 		this.implicitScrollView = new ScrollView(this.implicitDocument, { follow: "end", primary: true });
-		this.flashes = new AltScreenFlashContainer(() => this.requestRender());
+		this.flashes = new AltScreenFlashContainer(() => this.requestViewportRender());
 		this.wheelScrollLines = Math.max(1, Math.floor(options.wheelScrollLines ?? 1));
 		this.mouseEnabled = options.mouse ?? true;
 		this.searchMatchStyle = options.searchMatchStyle ?? ((text) => `\x1b[4m${text}\x1b[24m`);
@@ -323,6 +326,33 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 
 	override render(width: number): string[] {
 		return this.layoutRoot?.render(width) ?? super.render(width);
+	}
+
+	override requestRender(force = false): void {
+		this.contentRenderPending = true;
+		super.requestRender(force);
+	}
+
+	override renderNow(force = false): void {
+		// Explicit renders must observe changes even when no requestRender was sent.
+		this.contentRenderPending = true;
+		super.renderNow(force);
+	}
+
+	override invalidate(): void {
+		this.contentRenderPending = true;
+		super.invalidate();
+	}
+
+	protected override requestImmediateRender(): void {
+		// Keyboard input can preempt a queued scroll without calling requestRender.
+		this.contentRenderPending = true;
+		super.requestImmediateRender();
+	}
+
+	private requestViewportRender(): void {
+		this.viewportRenderPending = true;
+		super.requestRender();
 	}
 
 	protected override getMountedRoots(): readonly Component[] {
@@ -470,6 +500,8 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 	}
 
 	protected override resetRenderState(): void {
+		this.contentRenderPending = true;
+		this.viewportRenderPending = false;
 		this.previousScreen = [];
 		this.previousScreenWidth = 0;
 		this.previousScreenHeight = 0;
@@ -478,17 +510,17 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 
 	scrollBy(lines: number): void {
 		this.getPrimaryScrollView().scrollBy(lines);
-		this.requestRender();
+		this.requestViewportRender();
 	}
 
 	scrollToTop(): void {
 		this.getPrimaryScrollView().scrollToStart();
-		this.requestRender();
+		this.requestViewportRender();
 	}
 
 	scrollToBottom(): void {
 		this.getPrimaryScrollView().scrollToEnd();
-		this.requestRender();
+		this.requestViewportRender();
 	}
 
 	private scrollToPrompt(direction: -1 | 1): void {
@@ -500,7 +532,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		for (let row = scrollView.scrollTop + direction; row >= 0 && row < lines.length; row += direction) {
 			if (!OSC133_PROMPT_START.test(lines[row] ?? "")) continue;
 			scrollView.scrollTo(row);
-			this.requestRender();
+			this.requestViewportRender();
 			return;
 		}
 	}
@@ -555,7 +587,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		const search = this.activeSearch;
 		if (!search?.query) return;
 		search.selectionMode = direction < 0 ? "previous" : "next";
-		this.requestRender();
+		this.requestViewportRender();
 	}
 
 	private getSearchNavigationDirectionAt(x: number, y: number): -1 | 1 | undefined {
@@ -994,7 +1026,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		const primary = this.getPrimaryScrollView();
 		if (remaining !== 0 && !seen.has(primary)) primary.scrollBy(remaining);
 		this.updateScrollbarHover(event.x, event.y);
-		this.requestRender();
+		this.requestViewportRender();
 	}
 
 	private parseSgrMouseEvent(data: string): SgrMouseEvent | undefined {
@@ -1299,7 +1331,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		}
 		const point = this.getScrollSelectionPoint(scrollView, pointer.x, pointer.y);
 		if (point) this.updateSelectionFocus(point);
-		this.requestRender();
+		this.requestViewportRender();
 	}
 
 	private stopSelectionAutoScroll(): void {
@@ -1793,9 +1825,23 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		const width = Math.max(1, this.terminal.columns);
 		const height = Math.max(1, this.terminal.rows);
 		const root = this.layoutRoot ?? this.implicitScrollView;
-		let nextLayout = renderLayoutFrame(root, width, height, () => this.requestRender());
+		const retained =
+			this.viewportRenderPending &&
+			!this.contentRenderPending &&
+			this.currentLayout?.width === width &&
+			this.currentLayout.height === height
+				? this.currentLayout
+				: undefined;
+		// Consume before rendering so a synchronous content request is not lost.
+		this.contentRenderPending = false;
+		this.viewportRenderPending = false;
+		let nextLayout =
+			(retained && repaintLayoutFrame(retained)) ??
+			renderLayoutFrame(root, width, height, () => this.requestViewportRender());
 		if (this.refreshSearch(nextLayout)) {
-			nextLayout = renderLayoutFrame(root, width, height, () => this.requestRender());
+			nextLayout =
+				repaintLayoutFrame(nextLayout) ??
+				renderLayoutFrame(root, width, height, () => this.requestViewportRender());
 		}
 		let screen = nextLayout.lines.map((line) => line.replace(OSC133_ZONE_PREFIX, ""));
 		screen = this.applySearchHighlights(screen, nextLayout);
