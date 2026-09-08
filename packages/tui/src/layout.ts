@@ -414,6 +414,29 @@ export function renderLayoutFrame(
 	};
 }
 
+/** Repaint a retained layout after viewport-only changes, without invoking component renderers. */
+export function repaintLayoutFrame(frame: LayoutFrame): LayoutFrame | undefined {
+	const compatible = (box: LayoutBox): boolean =>
+		(!box.scrollView || box.scrollView.getContentWidth(box.rect.width) === box.children[0]?.rect.width) &&
+		box.children.every(compatible);
+	// Reserving a scrollbar column changes wrapping and intrinsic heights.
+	if (!compatible(frame.root)) return undefined;
+
+	const copy = (previous: LayoutBox, deltaY: number, clip: LayoutRect, parent?: LayoutBox): LayoutBox => {
+		const rect = { ...previous.rect, y: previous.rect.y + deltaY };
+		const box: LayoutBox = { ...previous, rect, clip: intersect(clip, rect), parent, children: [] };
+		for (const child of previous.children) {
+			const childDelta = box.scrollView ? rect.y - box.scrollView.scrollTop - child.rect.y : deltaY;
+			box.children.push(copy(child, childDelta, box.clip, box));
+		}
+		return box;
+	};
+	const root = copy(frame.root, 0, { x: 0, y: 0, width: frame.width, height: frame.height });
+	const lines = Array.from({ length: frame.height }, () => "");
+	paintBox(root, lines, frame.width);
+	return { ...frame, root, lines };
+}
+
 function containsPoint(rect: LayoutRect, x: number, y: number): boolean {
 	return x >= rect.x && x < rect.x + rect.width && y >= rect.y && y < rect.y + rect.height;
 }

@@ -1,5 +1,6 @@
 import { Input } from "./components/input.ts";
 import { getKeybindings } from "./keybindings.ts";
+import { snapshotSelectionLines } from "./selection-map.ts";
 import type { Component, Focusable } from "./tui.ts";
 import { getGraphemeSegmenter, stripTerminalSequences, truncateToWidth, visibleWidth } from "./utils.ts";
 
@@ -160,18 +161,17 @@ export class AltScreenSearchIndex {
 	private matches: AltScreenSearchMatch[] = [];
 
 	search(lines: readonly string[], query: string): AltScreenSearchResult {
-		let sourceChanged = this.sourceLines?.length !== lines.length;
-		if (!sourceChanged && this.sourceLines) {
-			for (let index = 0; index < lines.length; index++) {
-				if (this.sourceLines[index] === lines[index]) continue;
+		const snapshot = snapshotSelectionLines(lines);
+		let sourceChanged = this.sourceLines?.length !== snapshot.length;
+		if (!sourceChanged && this.sourceLines && this.sourceLines !== snapshot) {
+			for (let index = 0; index < snapshot.length; index++) {
+				if (this.sourceLines[index] === snapshot[index]) continue;
 				sourceChanged = true;
 				break;
 			}
 		}
-		if (sourceChanged || !this.corpus) {
-			this.sourceLines = Array.from(lines);
-			this.corpus = buildSearchCorpus(lines);
-		}
+		if (sourceChanged || !this.corpus) this.corpus = buildSearchCorpus(snapshot);
+		this.sourceLines = snapshot;
 
 		const normalizedQuery = normalizeQuery(query);
 		const changed = sourceChanged || normalizedQuery !== this.normalizedQuery;

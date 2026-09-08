@@ -1,5 +1,9 @@
 # Selection redraw performance
 
+For viewport-only scrolling, see [retained viewport rendering](retained-viewport.md).
+The full content-render behavior and earlier measurements below still apply to
+content requests.
+
 A retained selection used to resolve every historical message's copy map on each
 redraw. Decorators returning fresh frame arrays repeatedly triggered rectangle
 verification and source-span projection, even for unchanged message bodies.
